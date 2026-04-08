@@ -279,7 +279,7 @@ def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit
                 print(f"      ✓ {name} = {val!r}")
             else:
                 print(f"      ✗ {name} = (unfilled)")
-        print(f"    ---")
+        print("    ---")
 
         if not submit:
             print(f"    [DRY RUN] Form filled but NOT submitted at {form_url}")
@@ -292,7 +292,7 @@ def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit
     except Exception as e:
         print(f"    Pattern fill failed: {e}")
         try:
-            print(f"    Retrying with Claude form analysis...")
+            print("    Retrying with Claude form analysis...")
             browser2 = mechanicalsoup.StatefulBrowser(
                 user_agent="Mozilla/5.0",
                 raise_on_404=True,
@@ -325,7 +325,7 @@ def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit
 
             mappings = _fill_form_with_claude(form_html, sender_email, rfp_body)
             if not mappings:
-                print(f"    Claude couldn't map the form either")
+                print("    Claude couldn't map the form either")
                 return False
 
             browser2.select_form(page_forms[best_idx])
@@ -350,7 +350,7 @@ def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit
                     print(f"      ✓ {name} = {mappings[name]!r}")
                 else:
                     print(f"      ✗ {name} = (unfilled)")
-            print(f"    ---")
+            print("    ---")
 
             if not submit:
                 print(f"    [DRY RUN] Form filled via Claude but NOT submitted at {form_url}")

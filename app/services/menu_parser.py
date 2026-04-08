@@ -8,7 +8,6 @@ import json
 import os
 import base64
 import hashlib
-from pathlib import Path
 
 import anthropic
 from pydantic import BaseModel, field_validator

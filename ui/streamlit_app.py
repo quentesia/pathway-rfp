@@ -10,7 +10,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from app.db import init_db, SessionLocal
 from app.models import (
-    Restaurant, Recipe, Ingredient, RecipeIngredient,
+    Recipe, Ingredient, RecipeIngredient,
     USDAPrice, Distributor, DistributorIngredient,
     RFPEmail, RFPQuote,
 )
