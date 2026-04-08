@@ -159,7 +159,6 @@ def store_parsed_recipes(
 
 def parse_menu(session: Session, restaurant_name: str,
                menu_image_path: str, location: str = "",
-               menu_url: str = "",
                on_status: callable = None) -> tuple[Restaurant, list[Recipe]]:
     """Menu photo → Claude vision → validated recipes → DB.
 
@@ -186,7 +185,6 @@ def parse_menu(session: Session, restaurant_name: str,
     restaurant = Restaurant(
         name=restaurant_name,
         location=location,
-        menu_source_url=menu_url,
         menu_hash=menu_hash,
     )
     session.add(restaurant)

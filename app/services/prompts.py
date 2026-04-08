@@ -91,7 +91,7 @@ We requested quotes for these specific ingredients:
 {requested_ingredients}
 
 RULES:
-- Extract all pricing, units, and delivery notes for any mentioned ingredients.
+- Extract all pricing, units, delivery notes, and delivery charge details for any mentioned ingredients.
 - For `not_supplied`: include ONLY ingredients the distributor EXPLICITLY says they cannot supply.
 - For `clarification_needed`: include ingredients that are missing key details (price/unit), OR were omitted entirely from the reply.
 - Do NOT assume omitted ingredients are not supplied unless the distributor explicitly said so.

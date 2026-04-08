@@ -1,4 +1,4 @@
-# pathway-rfd
+# pathway-rfp
 
 End-to-end restaurant RFP pipeline for the Pathway take-home exercise.
 
@@ -14,26 +14,27 @@ This project automates the RFP workflow:
 
 ## Typical Flow
 
-1. Step 1: upload a menu image and parse
+1. **Step 1: upload a menu image and parse**
 
 - The image is sent to the LLM parser (Anthropic primary, OpenAI fallback) with a structured schema prompt.
 - The parser extracts all visible dishes and infers realistic ingredient lists and per-serving quantities.
 - Results are stored in `recipes`, `ingredients`, and `recipe_ingredients`.
 
-2. Step 2: fetch market trends
+2. **Step 2: fetch market trends**
 
 - Fetches BLS price data (used here as a market trend proxy) and caches series data by month.
+- Uses BLS instead of USDA here because BLS provides broader, stable monthly national price series that are easier to map consistently across mixed restaurant ingredients.
 - On reruns, it reuses cache if current-month data already exists.
 - Ingredient names are matched to BLS items via LLM matching and fallback logic.
 - Structured trend metadata/tags are stored with each ingredient pricing record.
 
-3. Step 3: find distributors
+3. **Step 3: find distributors**
 
 - Uses Serper (Google Places) to find distributors for required ingredient categories in the selected area.
 - Stores distributors and their ingredient links in `distributors` and `distributor_ingredients`.
 - Scrapes websites for contact emails or contact forms; falls back to phone-only when needed.
 
-4. Step 4: send outreach (`Dry Run` or `Live`)
+4. **Step 4: send outreach (`Dry Run` or `Live`)**
 
 - Sends RFP emails (from your configured Gmail sender) to distributors with email contacts.
   - If `Dry Run`, recipients are redirected to Yopmail inboxes.
@@ -41,7 +42,7 @@ This project automates the RFP workflow:
   - In `Dry Run`, forms are filled and reported but not submitted.
 - Phone-only vendors are marked as skipped for manual follow-up.
 
-5. Step 5: check inbox and review provider coverage/pricing
+5. **Step 5: check inbox and review provider coverage/pricing**
 
 - Reads replies from Gmail, matches them to contacted distributors, and parses quoted details.
 - Updates `distributor_ingredients` with:
@@ -62,8 +63,8 @@ Using the email mentioned in the test user removes the need for gmail authentica
 1. Clone and install:
 
 ```bash
-git clone git@github.com:quentesia/pathway-rfd.git
-cd pathway-rfd
+git clone git@github.com:quentesia/pathway-rfp.git
+cd pathway-rfp
 make setup
 make env
 ```
@@ -104,8 +105,8 @@ For the most important architecture/tradeoff decisions (organized by pipeline st
 ### 1) Clone
 
 ```bash
-git clone git@github.com:quentesia/pathway-rfd.git
-cd pathway-rfd
+git clone git@github.com:quentesia/pathway-rfp.git
+cd pathway-rfp
 ```
 
 ### 2) Create environment and install dependencies

@@ -60,6 +60,9 @@ class QuoteItem(BaseModel):
     quoted_price: float | None = Field(None, description="Null if price not clearly stated")
     unit: str | None = Field(None, description="e.g. lb, oz, case")
     delivery_terms: str | None = None
+    delivery_charge: float | None = Field(None, description="Delivery fee amount when explicitly provided")
+    delivery_charge_unit: str | None = Field(None, description="e.g. per order, per mile, per case")
+    delivery_charge_notes: str | None = Field(None, description="Extra details like thresholds or waived conditions")
 
 class ParsedQuoteList(BaseModel):
     quotes: list[QuoteItem] = Field(description="Items they explicitly priced")
@@ -98,25 +101,94 @@ Procurement Team
 """
 
 
-def _compose_followup(distributor_name: str, missing_items: list[str]) -> str:
-    items = "\n".join(f"  - {item}" for item in missing_items)
-    return f"""Dear {distributor_name} Team,
+def _compose_followup(
+    distributor_name: str,
+    missing_ingredients: list[str],
+    missing_delivery_items: list[str],
+) -> str:
+    sections = [f"Dear {distributor_name} Team,", "", "Thank you for your quote."]
 
-Thank you for your quote. We noticed the following items were missing or unclear:
+    if missing_ingredients:
+        ingredient_lines = "\n".join(f"  - {item}" for item in missing_ingredients)
+        sections.extend(
+            [
+                "",
+                "We still need availability/pricing confirmation for these ingredients:",
+                "",
+                ingredient_lines,
+                "",
+                "Please provide price and unit details for the items above.",
+            ]
+        )
 
-{items}
+    if missing_delivery_items:
+        delivery_lines = "\n".join(f"  - {item}" for item in missing_delivery_items)
+        sections.extend(
+            [
+                "",
+                "For the following confirmed items, we still need delivery details:",
+                "",
+                delivery_lines,
+                "",
+                "Please share delivery schedule/lead times and delivery charges/fees "
+                "(or explicitly mark them as TBD).",
+            ]
+        )
 
-Could you please confirm availability and provide updated pricing/unit details for these items?
+    sections.extend(
+        [
+            "",
+            "Also, if available, please share:",
+            "- Minimum order quantities (MOQs)",
+            "- Any bulk/volume discount tiers",
+            "- Payment terms",
+            "",
+            "Best regards,",
+            "Procurement Team",
+            "",
+        ]
+    )
+    return "\n".join(sections)
 
-Also, for the quoted items, please share:
-- Minimum order quantities (MOQs)
-- Any bulk/volume discount tiers
-- Delivery schedule and lead times
-- Payment terms
 
-Best regards,
-Procurement Team
-"""
+def _has_textual_tbd_or_equivalent(value: str | None) -> bool:
+    if not value:
+        return False
+    v = value.strip().lower()
+    markers = (
+        "tbd",
+        "to be determined",
+        "pending",
+        "unknown",
+        "n/a",
+        "na",
+        "included",
+        "free",
+        "no charge",
+        "waived",
+    )
+    return any(m in v for m in markers)
+
+
+def _is_delivery_charge_resolved(link: DistributorIngredient) -> bool:
+    # Numeric quote is the strongest signal.
+    if link.delivery_charge is not None:
+        return True
+    # Allow explicit textual status for demo/procurement workflows.
+    if _has_textual_tbd_or_equivalent(link.delivery_charge_notes):
+        return True
+    if _has_textual_tbd_or_equivalent(link.delivery_terms):
+        return True
+    return False
+
+
+def _is_delivery_terms_resolved(link: DistributorIngredient) -> bool:
+    if link.delivery_terms and link.delivery_terms.strip():
+        return True
+    # Fallback: if charge notes explicitly encode TBD/known status, treat as acknowledged.
+    if _has_textual_tbd_or_equivalent(link.delivery_charge_notes):
+        return True
+    return False
 
 
 def collect_quotes(
@@ -211,6 +283,9 @@ def collect_quotes(
                     link.quoted_price = q.quoted_price
                     link.quoted_unit = q.unit
                     link.delivery_terms = q.delivery_terms
+                    link.delivery_charge = q.delivery_charge
+                    link.delivery_charge_unit = q.delivery_charge_unit
+                    link.delivery_charge_notes = q.delivery_charge_notes
                     updated_links.append(link)
                     break
 
@@ -221,20 +296,34 @@ def collect_quotes(
                     link.supply_status = "does_not_supply"
                     break
 
-        # Check completeness: are all ingredients accounted for?
-        unquoted = [
+        # Check completeness: all ingredients must be resolved as confirmed or does_not_supply.
+        unresolved_supply = [
             l for l in links
-            if l.supply_status == "unconfirmed" and l.ingredient.name not in parsed.clarification_needed
+            if l.supply_status not in ("confirmed", "does_not_supply")
         ]
-        needs_clarification = list(parsed.clarification_needed) + [l.ingredient.name for l in unquoted]
-        # If delivery terms are missing for confirmed items, request clarification.
-        missing_delivery_terms = [
-            l.ingredient.name for l in links
-            if l.supply_status == "confirmed" and not l.delivery_terms
-        ]
+        # Preserve explicit model-requested clarification signals only if item remains unresolved.
+        unresolved_names = [l.ingredient.name for l in unresolved_supply]
+        parsed_clarification_names = []
+        for item_name in parsed.clarification_needed:
+            if any(
+                item_name.lower() in name.lower() or name.lower() in item_name.lower()
+                for name in unresolved_names
+            ):
+                parsed_clarification_names.append(item_name)
+        needs_clarification = parsed_clarification_names + unresolved_names
+
+        # For confirmed items, delivery terms + delivery charges must be provided
+        # (or explicitly marked TBD/unknown/included).
+        missing_delivery_info = []
+        for l in links:
+            if l.supply_status != "confirmed":
+                continue
+            if not _is_delivery_terms_resolved(l) or not _is_delivery_charge_resolved(l):
+                missing_delivery_info.append(l.ingredient.name)
+
         needs_clarification = sorted(set(needs_clarification))
-        missing_delivery_terms = sorted(set(missing_delivery_terms))
-        needs_followup = bool(needs_clarification or missing_delivery_terms)
+        missing_delivery_info = sorted(set(missing_delivery_info))
+        needs_followup = bool(needs_clarification or missing_delivery_info)
 
         to_email = _make_yopmail(distributor.name) if mock_recipient == "demo" else distributor.email
         subject = f"Re: Request for Proposal — {distributor.name}"
@@ -249,10 +338,13 @@ def collect_quotes(
             _status(
                 f"  {distributor.name}: follow-up needed "
                 f"({len(needs_clarification)} ingredient clarifications, "
-                f"{len(missing_delivery_terms)} delivery-term clarifications)"
+                f"{len(missing_delivery_info)} delivery clarifications)"
             )
-            followup_items = sorted(set(needs_clarification + missing_delivery_terms))
-            body = _compose_followup(distributor.name, followup_items)
+            body = _compose_followup(
+                distributor.name,
+                sorted(set(needs_clarification)),
+                sorted(set(missing_delivery_info)),
+            )
             send_email(service, sender, to_email, subject, body)
 
     if restaurant:

@@ -88,6 +88,7 @@ INGREDIENTS NEEDED:
 We would appreciate receiving your best pricing per unit, along with:
 - Minimum order quantities
 - Delivery schedule and lead times
+- Delivery charges/fees
 - Any volume discounts available
 
 Please submit your quote by {deadline_str}.

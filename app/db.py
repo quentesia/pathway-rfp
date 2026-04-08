@@ -44,3 +44,16 @@ def _ensure_schema_columns():
         for col, col_type in needed.items():
             if col not in existing_cols:
                 conn.execute(text(f"ALTER TABLE usda_prices ADD COLUMN {col} {col_type}"))
+
+        dist_rows = conn.execute(text("PRAGMA table_info(distributor_ingredients)")).fetchall()
+        if not dist_rows:
+            return
+        dist_existing_cols = {r[1] for r in dist_rows}
+        dist_needed = {
+            "delivery_charge": "FLOAT",
+            "delivery_charge_unit": "TEXT",
+            "delivery_charge_notes": "TEXT",
+        }
+        for col, col_type in dist_needed.items():
+            if col not in dist_existing_cols:
+                conn.execute(text(f"ALTER TABLE distributor_ingredients ADD COLUMN {col} {col_type}"))

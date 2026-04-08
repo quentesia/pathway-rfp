@@ -1,7 +1,7 @@
 .PHONY: help setup env auth-gmail run reset-db poll-inbox check
 
 help: ## Show available commands
-	@echo "pathway-rfd commands:"
+	@echo "pathway-rfp commands:"
 	@grep -E '^[a-zA-Z_-]+:.*##' Makefile | awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 setup: ## Install dependencies via uv

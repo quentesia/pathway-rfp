@@ -22,7 +22,6 @@ class Restaurant(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
     location = Column(String)
-    menu_source_url = Column(String)
     menu_hash = Column(String, index=True)
     last_inbox_check = Column(DateTime)
     created_at = Column(Date, default=_today)
@@ -174,6 +173,9 @@ class DistributorIngredient(Base):
     quoted_price = Column(Float)
     quoted_unit = Column(String)
     delivery_terms = Column(String)
+    delivery_charge = Column(Float)
+    delivery_charge_unit = Column(String)
+    delivery_charge_notes = Column(String)
 
     distributor = relationship("Distributor", back_populates="ingredient_links")
     ingredient = relationship("Ingredient", back_populates="distributor_links")

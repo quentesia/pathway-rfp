@@ -1,6 +1,7 @@
 """Streamlit UI: visualizes each step of the RFP pipeline."""
 
 import sys
+import os
 from pathlib import Path
 
 # Add project root to path
@@ -16,7 +17,7 @@ from app.models import (
 from app.services.menu_parser import parse_menu
 from app.services.usda_client import fetch_market_trends
 from app.services.distributor_finder import find_local_distributors
-from app.services.email_sender import send_rfp_emails
+from app.services.email_sender import send_rfp_emails, compose_rfp_body
 from app.services.inbox_monitor import collect_quotes
 from app.utils import (
     DEMAND_TIER_BASE_COVERS,
@@ -99,8 +100,10 @@ sidebar_restaurant_id = st.session_state.get("pipeline_state", {}).get("restaura
 with st.sidebar:
     st.header("Configuration")
     restaurant_name = st.text_input("Restaurant Name", "My Restaurant")
-    restaurant_location = st.text_input("Location", "Atlanta, GA")
-    menu_url = st.text_input("Menu Source URL (optional)", "")
+    restaurant_location = st.text_input(
+        "Location",
+        os.getenv("RESTAURANT_LOCATION", "Atlanta, GA"),
+    )
     run_mode = st.selectbox(
         "Outreach Mode",
         ["Dry Run", "Live"],
@@ -202,7 +205,6 @@ if st.button("Parse Menu", disabled=not has_input):
             restaurant_name=restaurant_name,
             menu_image_path=menu_image_path,
             location=restaurant_location,
-            menu_url=menu_url,
             on_status=lambda msg: status.write(msg),
         )
         ps["restaurant_id"] = restaurant.id
@@ -538,35 +540,52 @@ if ps["step4_done"]:
         for dist in distributors:
             status_icon = {"sent": "📨", "completed": "✅", "needs_clarification": "⚠️",
                            "form_ready": "📋", "skipped": "⏭️", "failed": "❌"}.get(dist.rfp_status, "")
-            with st.expander(f"{status_icon} [{dist.rfp_status}] {dist.name}"):
+            is_form_contact = bool(dist.email and dist.email.startswith("form:"))
+            is_phone_only = dist.rfp_status == "skipped" and not dist.email
+            phone_suffix = " — PHONE ONLY" if is_phone_only else ""
+            with st.expander(f"{status_icon} [{dist.rfp_status}] {dist.name}{phone_suffix}"):
                 links = [l for l in all_links if l.distributor_id == dist.id]
                 ing_names = [ingredients_map[l.ingredient_id].name for l in links if l.ingredient_id in ingredients_map]
-                st.write(f"**To:** {dist.email or 'N/A'}")
+                if is_phone_only:
+                    st.write("**Contact:** PHONE ONLY")
+                elif is_form_contact:
+                    form_url = dist.email[5:]
+                    st.write(f"**Contact Form:** {form_url}")
+                else:
+                    st.write(f"**To:** {dist.email or 'N/A'}")
                 st.write(f"**Ingredients requested:** {', '.join(ing_names)}")
                 if dist.rfp_sent_at:
                     st.write(f"**Sent:** {dist.rfp_sent_at.strftime('%Y-%m-%d %H:%M')}")
 
-                # Show email preview
+                # Show preview based on channel: email vs form vs phone-only.
                 if restaurant_obj and ing_names:
-                    ing_lines = []
+                    ingredients_with_info = []
                     for l in links:
                         if l.ingredient_id in ingredients_map:
                             ing = ingredients_map[l.ingredient_id]
                             qty_info = qty_map.get(l.ingredient_id)
                             if qty_info:
                                 qty, unit = qty_info
-                                ing_lines.append(f"  - {ing.name} — est. {qty:.0f} {unit}/week")
+                                ingredients_with_info.append((ing, None, ing.base_unit, qty, unit))
                             else:
-                                ing_lines.append(f"  - {ing.name}")
-                    st.markdown("**Email preview:**")
-                    st.code(
-                        f"Subject: Request for Proposal — Ingredient Pricing for {restaurant_obj.name}\n\n"
-                        f"Dear {dist.name} Team,\n\n"
-                        f"We are reaching out on behalf of {restaurant_obj.name} ({restaurant_obj.location}) to request\n"
-                        f"competitive pricing on the following ingredients:\n\n"
-                        + "\n".join(ing_lines),
-                        language=None,
-                    )
+                                ingredients_with_info.append((ing, None, ing.base_unit, None, ing.base_unit))
+                    subject, body = compose_rfp_body(restaurant_obj, dist, ingredients_with_info)
+
+                    if is_form_contact:
+                        st.markdown("**Filled form preview:**")
+                        st.json({
+                            "url": form_url,
+                            "fields": {
+                                "email": os.getenv("GMAIL_SENDER", ""),
+                                "subject": subject,
+                                "message": body,
+                            },
+                        })
+                    elif is_phone_only:
+                        st.caption("No email/form preview for phone-only vendors.")
+                    else:
+                        st.markdown("**Email preview:**")
+                        st.code(f"Subject: {subject}\n\n{body}", language=None)
 
         # Yopmail inbox links (dry run only)
         if is_dry_run:
@@ -843,6 +862,10 @@ if ps["step5_done"]:
                                     "Quoted Price": f"${l.quoted_price:.2f}" if l.quoted_price is not None else "N/A",
                                     "Unit": l.quoted_unit or "N/A",
                                     "Delivery": l.delivery_terms or "N/A",
+                                    "Delivery Charge": (
+                                        f"${l.delivery_charge:.2f}/{l.delivery_charge_unit or 'order'}"
+                                        if l.delivery_charge is not None else "N/A"
+                                    ),
                                 })
                             return rows
 
@@ -1001,6 +1024,10 @@ if ps["step5_done"]:
                         "Rating": rating_str,
                         "Quoted Price": f"${l.quoted_price:.2f}/{l.quoted_unit or 'unit'}" if l.quoted_price is not None else "N/A",
                         "Delivery Terms": l.delivery_terms or "N/A",
+                        "Delivery Charge": (
+                            f"${l.delivery_charge:.2f}/{l.delivery_charge_unit or 'order'}"
+                            if l.delivery_charge is not None else "N/A"
+                        ),
                     })
                 provider_rows.sort(key=lambda r: (r["Supply Status"], r["Provider"]))
                 st.dataframe(provider_rows, use_container_width=True)
