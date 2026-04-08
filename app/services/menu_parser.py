@@ -66,34 +66,6 @@ class MenuParseResult(BaseModel):
 # Build the JSON schema string from Pydantic to embed in the prompt
 _SCHEMA_JSON = json.dumps(MenuParseResult.model_json_schema(), indent=2)
 
-SYSTEM_PROMPT = f"""You are a professional chef and food scientist.
-You will be given a photo of a restaurant menu.
-
-Your job: for EVERY dish on the menu, produce a complete recipe with
-realistic ingredients and quantities for ONE serving.
-
-CRITICAL RULES:
-- Include ALL dishes visible on the menu. Do not skip any.
-- Use the dish description from the menu as-is for the "description" field.
-- DEDUPLICATE ingredients: if multiple dishes use the same ingredient,
-  use the EXACT same "name" string every time. e.g. always "Olive Oil",
-  never sometimes "Olive Oil" and sometimes "Extra Virgin Olive Oil"
-  unless they are truly different products. Decide this based on how you would request a distiibutor for items.
-- It should always be items attainable from a food distributor. Else, break it down into items that can be attained from a food distributor.
-  e.g. If the menu says "Mixed Cheeses", break it down into cheeses that typicall go into the meal. 
-- Infer realistic restaurant-scale quantities per serving.
-- Include everything a kitchen would need: proteins, produce, seasonings,
-  oils, garnishes, sauces.
-- Units MUST be one of: each, pinch, tsp, tbsp, cup, pt, qt, gal, ml, l, g, kg, oz, lb
-- Categories MUST be one of: Produce, Meat & Poultry, Seafood, Dairy & Eggs,
-  Dry Goods & Pantry, Frozen Foods, Bakery & Breads, Beverages, Oils Fats & Sauces, Other
-
-Your response MUST be valid JSON conforming to this exact schema:
-
-{_SCHEMA_JSON}
-
-Return ONLY the JSON. No markdown fences, no commentary."""
-
 
 # ── Claude call ──────────────────────────────────────────────────────────────
 
@@ -110,10 +82,12 @@ def parse_menu_image(image_path: str) -> MenuParseResult:
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+    from app.services.prompts import get_menu_parse_prompt
+    
     response = client.messages.create(
         model=MODEL,
         max_tokens=16384,
-        system=SYSTEM_PROMPT,
+        system=get_menu_parse_prompt(_SCHEMA_JSON),
         messages=[{
             "role": "user",
             "content": [

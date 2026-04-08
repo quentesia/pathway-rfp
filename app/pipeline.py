@@ -3,7 +3,7 @@
 from dotenv import load_dotenv
 from app.db import init_db, SessionLocal
 from app.services.menu_parser import parse_menu
-# from app.services.usda_client import fetch_ingredient_data
+from app.services.usda_client import run_step2
 # from app.services.distributor_finder import find_local_distributors
 # from app.services.email_sender import send_rfp_emails
 # from app.services.inbox_monitor import collect_quotes
@@ -31,23 +31,32 @@ def run_pipeline(
         print("\n" + "=" * 60)
         print("STEP 1: Parsing Menu into Recipes & Ingredients")
         print("=" * 60)
-        restaurant, recipes = parse_menu(
-            session, restaurant_name, menu_image_path,
-            location=restaurant_location, menu_url=menu_url,
-        )
+
+        # Skip if DB already has data for this restaurant
+        from app.models import Restaurant, Recipe
+        existing = session.query(Restaurant).filter_by(name=restaurant_name).first()
+        if existing and session.query(Recipe).filter_by(restaurant_id=existing.id).count() > 0:
+            restaurant = existing
+            recipes = session.query(Recipe).filter_by(restaurant_id=existing.id).all()
+            print(f"  Skipping — found {len(recipes)} existing recipes for '{restaurant_name}'")
+        else:
+            restaurant, recipes = parse_menu(
+                session, restaurant_name, menu_image_path,
+                location=restaurant_location, menu_url=menu_url,
+            )
         results["restaurant"] = restaurant
         results["recipes"] = recipes
 
-        # # Step 2: USDA Pricing
-        # print("\n" + "=" * 60)
-        # print("STEP 2: Fetching USDA Food Data")
-        # print("=" * 60)
-        # try:
-        #     prices = run_step2(session)
-        #     results["prices"] = prices
-        # except ValueError as e:
-        #     print(f"  Skipping Step 2: {e}")
-        #     results["prices"] = []
+        # Step 2: Market Price Trends
+        print("\n" + "=" * 60)
+        print("STEP 2: Fetching Market Price Trends (BLS)")
+        print("=" * 60)
+        try:
+            prices = run_step2(session)
+            results["prices"] = prices
+        except Exception as e:
+            print(f"  Skipping Step 2: {e}")
+            results["prices"] = []
 
         # # Step 3: Find Distributors
         # print("\n" + "=" * 60)

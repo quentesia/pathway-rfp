@@ -50,10 +50,11 @@ class Ingredient(Base):
     category = Column(String)
     base_unit = Column(String)
     perishable = Column(Boolean, default=True)
+    usda_id = Column(String)  # BLS series ID matched by Claude
     created_at = Column(Date, default=_today)
 
     recipe_ingredients = relationship("RecipeIngredient", back_populates="ingredient")
-    # usda_prices = relationship("USDAPrice", back_populates="ingredient")
+    usda_prices = relationship("USDAPrice", back_populates="ingredient")
     # distributor_links = relationship("DistributorIngredient", back_populates="ingredient")
 
 
@@ -73,19 +74,19 @@ class RecipeIngredient(Base):
 
 # ── Pricing (Step 2) ─────────────────────────────────────────────────────────
 
-# class USDAPrice(Base):
-#     __tablename__ = "usda_prices"
-#
-#     id = Column(Integer, primary_key=True, autoincrement=True)
-#     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
-#     usda_item_name = Column(String)
-#     price = Column(Float)
-#     unit = Column(String)
-#     date = Column(String)
-#     source = Column(String, default="USDA FoodData Central")
-#     created_at = Column(Date, default=_today)
-#
-#     ingredient = relationship("Ingredient", back_populates="usda_prices")
+class USDAPrice(Base):
+    __tablename__ = "usda_prices"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
+    usda_item_name = Column(String)
+    price = Column(Float)
+    unit = Column(String)
+    date = Column(String)
+    source = Column(String, default="BLS Average Price Data")
+    created_at = Column(Date, default=_today)
+
+    ingredient = relationship("Ingredient", back_populates="usda_prices")
 
 
 # ── Distributors (Step 3) ────────────────────────────────────────────────────

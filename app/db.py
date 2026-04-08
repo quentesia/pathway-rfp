@@ -17,7 +17,8 @@ def init_db():
     """Create all tables."""
     from app.models import (  # noqa: F401 — import to register models
         Restaurant, Recipe, Ingredient, RecipeIngredient,
-        # USDAPrice, Distributor, DistributorIngredient,
+        USDAPrice,
+        # Distributor, DistributorIngredient,
         # RFPEmail, RFPQuote,
     )
     Base.metadata.create_all(ENGINE)
