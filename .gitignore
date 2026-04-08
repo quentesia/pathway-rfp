@@ -9,3 +9,4 @@ rfp_pipeline.db
 *.egg-info/
 rules.pdf
 .talking_points.txt
+.todo.md

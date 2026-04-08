@@ -105,7 +105,7 @@ with st.sidebar:
         "Outreach Mode",
         ["Dry Run", "Live"],
         index=0,
-        help="Dry Run sends to Yopmail demo inboxes. Live sends to discovered distributor contacts.",
+        help="Both modes use Gmail API from your configured sender. Dry Run redirects recipients to Yopmail; Live uses discovered distributor contacts.",
     )
     is_dry_run = run_mode == "Dry Run"
     tier_options = list(DEMAND_TIER_BASE_COVERS.keys())
@@ -459,9 +459,9 @@ if ps["step3_done"]:
 st.header("Step 4: Send RFP Emails")
 st.markdown("Composes and sends RFP emails to each distributor requesting price quotes.")
 if is_dry_run:
-    st.caption("🧪 **DRY RUN MODE** — emails are sent to temporary Yopmail inboxes, not real distributors.")
+    st.caption(" **DRY RUN MODE** — emails are sent from your configured Gmail sender to temporary Yopmail inboxes, not real distributors.")
 else:
-    st.caption("🚀 **LIVE MODE** — emails are sent to distributor email/contact-form targets from Step 3.")
+    st.caption("**LIVE MODE** — emails are sent from your configured Gmail sender to distributor email/contact-form targets from Step 3.")
 
 _s4_has_existing = existing.get("step4") and not ps["step4_done"]
 if _s4_has_existing:
