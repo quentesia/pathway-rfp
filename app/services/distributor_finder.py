@@ -239,7 +239,14 @@ def find_distributors(location: str, categories: list[str]) -> list[dict]:
                             all_results[name_key]["categories_served"].append(c)
 
         if all_results:
-            return list(all_results.values())
+            final_list = list(all_results.values())
+            print("  Scraping distributor websites for real contact emails...")
+            for d in final_list:
+                if d.get("website") and not d.get("email"):
+                    scraped_email = scrape_email_from_website(d["website"])
+                    if scraped_email:
+                        d["email"] = scraped_email
+            return final_list
         print("  No Serper results.")
 
     # print("  Using LLM inference fallback...")

@@ -5,7 +5,7 @@ from app.db import init_db, SessionLocal
 from app.services.menu_parser import parse_menu
 from app.services.usda_client import fetch_market_trends
 from app.services.distributor_finder import find_local_distributors
-# from app.services.email_sender import send_rfp_emails
+from app.services.email_sender import send_rfp_emails
 # from app.services.inbox_monitor import collect_quotes
 
 
@@ -74,12 +74,12 @@ def run_pipeline(
         distributors = find_local_distributors(session, location)
         results["distributors"] = distributors
 
-        # # Step 4: Send RFP Emails
-        # print("\n" + "=" * 60)
-        # print("STEP 4: Sending RFP Emails")
-        # print("=" * 60)
-        # emails = send_rfp_emails(session, restaurant.id, mock_recipient=mock_email)
-        # results["emails"] = emails
+        # Step 4: Send RFP Emails
+        print("\n" + "=" * 60)
+        print("STEP 4: Sending RFP Emails")
+        print("=" * 60)
+        emails = send_rfp_emails(session, restaurant.id, mock_recipient="demo")
+        results["emails"] = emails
 
         # # Step 5: Monitor Inbox (nice-to-have)
         # print("\n" + "=" * 60)

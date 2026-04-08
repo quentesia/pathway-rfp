@@ -34,7 +34,6 @@ with st.sidebar:
     restaurant_name = st.text_input("Restaurant Name", "My Restaurant")
     restaurant_location = st.text_input("Location", "Atlanta, GA")
     menu_url = st.text_input("Menu Source URL (optional)", "")
-    mock_email = st.text_input("Mock Email (for demo)", placeholder="your@email.com")
 
 # ── Session state ────────────────────────────────────────────────────────────
 
@@ -237,20 +236,24 @@ st.header("Step 4: Send RFP Emails")
 st.markdown("Composes and sends RFP emails to each distributor requesting price quotes.")
 
 if st.button("Send Emails", disabled=not ps["step3_done"]):
-    if not mock_email:
-        st.warning("Set a mock email address in the sidebar for demo mode.")
-    else:
-        with st.spinner("Sending RFP emails..."):
-            session = SessionLocal()
-            try:
-                emails = send_rfp_emails(
-                    session, ps["restaurant_id"], mock_recipient=mock_email
-                )
-                ps["step4_done"] = True
-                sent = sum(1 for e in emails if e.status == "sent")
-                st.success(f"Sent {sent}/{len(emails)} RFP emails!")
-            finally:
-                session.close()
+    with st.spinner("Sending RFP emails..."):
+        session = SessionLocal()
+        try:
+            emails = send_rfp_emails(
+                session, ps["restaurant_id"], mock_recipient="demo"
+            )
+            ps["step4_done"] = True
+            sent = sum(1 for e in emails if e.status == "sent")
+            forms = sum(1 for e in emails if e.status == "form_submitted")
+            skipped = sum(1 for e in emails if e.status == "skipped")
+            parts = [f"{sent} emailed"]
+            if forms:
+                parts.append(f"{forms} forms submitted")
+            if skipped:
+                parts.append(f"{skipped} skipped (phone only)")
+            st.success(f"RFP outreach: {' — '.join(parts)} out of {len(emails)} distributors")
+        finally:
+            session.close()
 
 if ps["step4_done"]:
     session = SessionLocal()
@@ -260,10 +263,7 @@ if ps["step4_done"]:
         ).all()
         for email in emails:
             dist = session.query(Distributor).get(email.distributor_id)
-            status_icon = {"sent": "sent", "failed": "failed", "draft": "draft"}.get(
-                email.status, email.status
-            )
-            with st.expander(f"[{status_icon}] To: {dist.name}"):
+            with st.expander(f"[{email.status}] To: {dist.name}"):
                 st.write(f"**Subject:** {email.subject}")
                 st.code(email.body, language=None)
     finally:
