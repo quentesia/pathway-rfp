@@ -21,6 +21,26 @@ STANDARD_CATEGORIES = [
     "Other",
 ]
 
+DEMAND_TIER_BASE_COVERS = {
+    "Conservative": 18,
+    "Standard": 32,
+    "Busy": 50,
+    "High Volume": 72,
+}
+
+_CATEGORY_DEMAND_MULTIPLIERS = {
+    "Produce": 1.00,
+    "Meat & Poultry": 0.85,
+    "Seafood": 0.35,
+    "Dairy & Eggs": 0.85,
+    "Dry Goods & Pantry": 1.05,
+    "Frozen Foods": 0.65,
+    "Bakery & Breads": 0.75,
+    "Beverages": 0.90,
+    "Oils, Fats & Sauces": 0.60,
+    "Other": 0.75,
+}
+
 _CATEGORY_ALIASES = {
     "produce": "Produce",
     "vegetable": "Produce",
@@ -177,8 +197,9 @@ def aggregate_quantities(
         if recipes_map:
             recipe = recipes_map.get(ri.recipe_id)
             if recipe:
-                if weekly_covers_by_category and recipe.category in weekly_covers_by_category:
-                    recipe_weekly_covers = weekly_covers_by_category[recipe.category]
+                recipe_category = normalize_category_name(recipe.category)
+                if weekly_covers_by_category and recipe_category in weekly_covers_by_category:
+                    recipe_weekly_covers = weekly_covers_by_category[recipe_category]
                 if recipe.popularity_multiplier:
                     popularity = recipe.popularity_multiplier
 
@@ -222,24 +243,28 @@ def load_category_cover_overrides_from_env(
     return cleaned
 
 
+def load_demand_tier_from_env(env_var: str = "RFP_DEMAND_TIER") -> str:
+    """Load demand tier from env, defaulting to Standard."""
+    raw = os.getenv(env_var, "").strip().lower()
+    for label in DEMAND_TIER_BASE_COVERS:
+        if raw == label.lower().replace(" ", "_") or raw == label.lower():
+            return label
+    return "Standard"
+
+
 def estimate_category_weekly_covers(
     recipes: list[Recipe],
     baseline_weekly_covers: int,
     env_overrides: dict[str, int] | None = None,
 ) -> dict[str, int]:
-    """Estimate per-category weekly covers from Claude popularity multipliers."""
-    by_category: dict[str, list[float]] = {}
-    for recipe in recipes:
-        category = normalize_category_name(recipe.category)
-        popularity = recipe.popularity_multiplier or 1.0
-        est = max(0.0, baseline_weekly_covers * popularity)
-        by_category.setdefault(category, []).append(est)
-
-    estimated = {
-        category: int(round(sum(vals) / len(vals)))
-        for category, vals in by_category.items()
-        if vals
-    }
+    """Estimate per-category weekly covers from tier baseline + category factors."""
+    categories = sorted({normalize_category_name(r.category) for r in recipes}) or ["Other"]
+    estimated = {}
+    for category in categories:
+        factor = _CATEGORY_DEMAND_MULTIPLIERS.get(category, 0.75)
+        est = int(round(baseline_weekly_covers * factor))
+        # Keep estimates in a realistic range by default.
+        estimated[category] = max(4, min(160, est))
 
     if env_overrides:
         estimated.update(env_overrides)

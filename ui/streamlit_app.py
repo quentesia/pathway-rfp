@@ -19,10 +19,12 @@ from app.services.distributor_finder import find_local_distributors
 from app.services.email_sender import send_rfp_emails
 from app.services.inbox_monitor import collect_quotes
 from app.utils import (
+    DEMAND_TIER_BASE_COVERS,
     aggregate_quantities,
     category_tag,
     estimate_category_weekly_covers,
     load_category_cover_overrides_from_env,
+    load_demand_tier_from_env,
     normalize_category_name,
     normalize_category_list,
 )
@@ -73,8 +75,8 @@ def _check_existing_data(restaurant_id: int) -> dict:
         session.close()
 
 
-def _get_claude_category_covers(restaurant_id: int, baseline_weekly_covers: int) -> dict[str, int]:
-    """Estimate category covers from Claude popularity + optional env overrides."""
+def _get_tiered_category_covers(restaurant_id: int, baseline_weekly_covers: int) -> dict[str, int]:
+    """Estimate category covers from demand tier + category factors + env overrides."""
     session = SessionLocal()
     try:
         recipes = session.query(Recipe).filter(
@@ -99,17 +101,33 @@ with st.sidebar:
     restaurant_name = st.text_input("Restaurant Name", "My Restaurant")
     restaurant_location = st.text_input("Location", "Atlanta, GA")
     menu_url = st.text_input("Menu Source URL (optional)", "")
-    weekly_covers = st.number_input(
-        "Est. weekly covers per dish",
-        min_value=1, max_value=500, value=40,
-        help="How many times each dish is ordered per week. Used to estimate procurement quantities.",
+    run_mode = st.selectbox(
+        "Outreach Mode",
+        ["Dry Run", "Live"],
+        index=0,
+        help="Dry Run sends to Yopmail demo inboxes. Live sends to discovered distributor contacts.",
+    )
+    is_dry_run = run_mode == "Dry Run"
+    tier_options = list(DEMAND_TIER_BASE_COVERS.keys())
+    default_tier = load_demand_tier_from_env()
+    demand_tier = st.selectbox(
+        "Demand Tier",
+        tier_options,
+        index=tier_options.index(default_tier) if default_tier in tier_options else tier_options.index("Standard"),
+        help="Baseline demand profile only. Dish-level differentiation still comes from Claude popularity multipliers and category factors.",
+    )
+    baseline_weekly_covers = DEMAND_TIER_BASE_COVERS[demand_tier]
+    st.caption(
+        f"Tier baseline: {baseline_weekly_covers} weekly covers per average dish. "
+        "Claude dish popularity and category factors still differentiate individual items."
     )
     if sidebar_restaurant_id:
-        category_defaults = _get_claude_category_covers(sidebar_restaurant_id, int(weekly_covers))
+        category_defaults = _get_tiered_category_covers(sidebar_restaurant_id, baseline_weekly_covers)
         if category_defaults:
             with st.expander("Weekly Covers by Category", expanded=False):
                 st.caption(
-                    "Auto-filled from Claude dish popularity; edit before sending if needed. "
+                    f"Auto-filled from demand tier ({demand_tier}) + category factors; "
+                    "edit before sending if needed. "
                     "Optional env override: RFP_WEEKLY_COVERS_BY_CATEGORY (JSON)."
                 )
                 for cat, default_val in category_defaults.items():
@@ -440,7 +458,10 @@ if ps["step3_done"]:
 
 st.header("Step 4: Send RFP Emails")
 st.markdown("Composes and sends RFP emails to each distributor requesting price quotes.")
-st.caption("🧪 **DRY RUN MODE** — emails are sent to temporary Yopmail inboxes, not real distributors.")
+if is_dry_run:
+    st.caption("🧪 **DRY RUN MODE** — emails are sent to temporary Yopmail inboxes, not real distributors.")
+else:
+    st.caption("🚀 **LIVE MODE** — emails are sent to distributor email/contact-form targets from Step 3.")
 
 _s4_has_existing = existing.get("step4") and not ps["step4_done"]
 if _s4_has_existing:
@@ -459,8 +480,8 @@ if _s4_run:
     session = SessionLocal()
     try:
         processed = send_rfp_emails(
-            session, ps["restaurant_id"], mock_recipient="demo",
-            weekly_covers=weekly_covers,
+            session, ps["restaurant_id"], mock_recipient="demo" if is_dry_run else None,
+            weekly_covers=baseline_weekly_covers,
             weekly_covers_by_category=category_weekly_covers or None,
             on_status=lambda msg: status.write(msg),
         )
@@ -508,7 +529,7 @@ if ps["step4_done"]:
         recipes_map = {r.id: r for r in session.query(Recipe).filter(Recipe.id.in_(ri_recipe_ids)).all()} if ri_recipe_ids else {}
         qty_map = aggregate_quantities(
             all_recipe_ings,
-            weekly_covers,
+            baseline_weekly_covers,
             ingredients_map,
             recipes_map,
             weekly_covers_by_category=category_weekly_covers or None,
@@ -548,16 +569,17 @@ if ps["step4_done"]:
                     )
 
         # Yopmail inbox links (dry run only)
-        from app.services.email_sender import _make_yopmail
-        sent_dists = [d for d in distributors if d.rfp_status in ("sent", "completed", "needs_clarification")]
-        if sent_dists:
-            st.divider()
-            st.markdown("🧪 **DRY RUN — Yopmail Inboxes**")
-            st.caption("These are temporary inboxes where the demo emails were sent. Open them to see/reply to the RFP.")
-            for dist in sent_dists:
-                yopmail = _make_yopmail(dist.name)
-                inbox_url = f"https://yopmail.com/en/?login={yopmail.split('@')[0]}"
-                st.markdown(f"- **{dist.name}**: [`{yopmail}`]({inbox_url})")
+        if is_dry_run:
+            from app.services.email_sender import _make_yopmail
+            sent_dists = [d for d in distributors if d.rfp_status in ("sent", "completed", "needs_clarification")]
+            if sent_dists:
+                st.divider()
+                st.markdown("🧪 **DRY RUN — Yopmail Inboxes**")
+                st.caption("These are temporary inboxes where the demo emails were sent. Open them to see/reply to the RFP.")
+                for dist in sent_dists:
+                    yopmail = _make_yopmail(dist.name)
+                    inbox_url = f"https://yopmail.com/en/?login={yopmail.split('@')[0]}"
+                    st.markdown(f"- **{dist.name}**: [`{yopmail}`]({inbox_url})")
     finally:
         session.close()
 
@@ -586,7 +608,7 @@ if _s5_run:
             status.write(msg)
 
         updated = collect_quotes(
-            session, ps["restaurant_id"], mock_recipient="demo",
+            session, ps["restaurant_id"], mock_recipient="demo" if is_dry_run else None,
             on_status=_on_status,
         )
         ps["step5_done"] = True
@@ -639,174 +661,349 @@ if ps["step5_done"]:
         if sent_dists:
             st.info(f"**{len(sent_dists)} distributor(s) haven't replied yet.** Check back later or re-run this step.")
 
-        # ── Quoted prices: all quotes from all distributors ──
-        quoted = session.query(DistributorIngredient).filter(
-            DistributorIngredient.quoted_price.isnot(None)
-        ).all()
+        # Shared Step 5 data for both views
+        all_dist_ids = [d.id for d in all_distributors]
+        all_links = session.query(DistributorIngredient).filter(
+            DistributorIngredient.distributor_id.in_(all_dist_ids)
+        ).all() if all_dist_ids else []
+        all_ing_ids = {l.ingredient_id for l in all_links}
+        ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+            Ingredient.id.in_(all_ing_ids)
+        ).all()} if all_ing_ids else {}
+        ingredient_category_map = {
+            ing_id: normalize_category_name(ing.category)
+            for ing_id, ing in ingredients_map.items()
+        }
+        all_step5_categories = sorted(set(ingredient_category_map.values()))
+        selected_step5_categories = st.multiselect(
+            "Filter Step 5 by Category",
+            all_step5_categories,
+            key="step5_category_filter",
+        )
 
-        if quoted:
-            dist_ids = {l.distributor_id for l in quoted}
-            ing_ids = {l.ingredient_id for l in quoted}
-            distributors_map = {d.id: d for d in session.query(Distributor).filter(
-                Distributor.id.in_(dist_ids)
-            ).all()}
-            ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
-                Ingredient.id.in_(ing_ids)
-            ).all()}
-            bls_map = {b.ingredient_id: b for b in session.query(USDAPrice).filter(
-                USDAPrice.ingredient_id.in_(ing_ids)
-            ).all()}
-            ingredient_category_map = {
-                ing_id: normalize_category_name(ing.category)
-                for ing_id, ing in ingredients_map.items()
-            }
-            all_step5_categories = sorted(set(ingredient_category_map.values()))
-            selected_step5_categories = st.multiselect(
-                "Filter Quote Results by Category",
-                all_step5_categories,
-                key="step5_category_filter",
-            )
-            quoted_filtered = [
-                l for l in quoted
-                if not selected_step5_categories
-                or ingredient_category_map.get(l.ingredient_id, "Other") in selected_step5_categories
-            ]
-            if selected_step5_categories and not quoted_filtered:
-                st.info("No quoted items match the selected category filter.")
+        filtered_links = [
+            l for l in all_links
+            if not selected_step5_categories
+            or ingredient_category_map.get(l.ingredient_id, "Other") in selected_step5_categories
+        ]
+        if filtered_links:
+            ingredient_ids_in_scope = sorted({l.ingredient_id for l in filtered_links})
+            best_by_ingredient: dict[int, tuple[float, int, str | None]] = {}
+            for l in filtered_links:
+                if l.quoted_price is None:
+                    continue
+                current = best_by_ingredient.get(l.ingredient_id)
+                if current is None or l.quoted_price < current[0]:
+                    best_by_ingredient[l.ingredient_id] = (l.quoted_price, l.distributor_id, l.quoted_unit)
 
-            # ── Best Prices (primary table) ──
-            st.subheader("Best Prices — Weekly Order Estimate")
-            st.caption("Market reference uses a wholesale proxy: 50% of BLS retail average.")
+            covered_ids = sorted(best_by_ingredient.keys())
+            uncovered_ids = [iid for iid in ingredient_ids_in_scope if iid not in best_by_ingredient]
 
-            # Aggregate weekly quantities
-            weekly_qty_map = {}
-            if ps["restaurant_id"]:
-                recipe_ings = session.query(RecipeIngredient).join(Recipe).filter(
-                    Recipe.restaurant_id == ps["restaurant_id"],
-                    RecipeIngredient.ingredient_id.in_(list(ing_ids)),
-                ).all()
-                recipe_ids = {ri.recipe_id for ri in recipe_ings}
-                recipes_map = {r.id: r for r in session.query(Recipe).filter(
-                    Recipe.id.in_(recipe_ids)
-                ).all()} if recipe_ids else {}
-                weekly_qty_map = aggregate_quantities(
-                    recipe_ings,
-                    weekly_covers,
-                    ingredients_map,
-                    recipes_map,
-                    weekly_covers_by_category=category_weekly_covers or None,
-                )
+            st.subheader("Coverage Snapshot")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Ingredients In Scope", len(ingredient_ids_in_scope))
+            c2.metric("With Provider Quote", len(covered_ids))
+            c3.metric("Without Provider Quote", len(uncovered_ids))
 
-            seen = {}
-            for link in quoted_filtered:
-                ing = ingredients_map[link.ingredient_id]
-                if ing.name not in seen or (link.quoted_price and link.quoted_price < seen[ing.name][1]):
-                    dist = distributors_map[link.distributor_id]
-                    seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit, link.ingredient_id)
-            best_rows = []
-            total_weekly_cost = 0.0
-            for ing_name, (dist_name, price, unit, ing_id) in seen.items():
-                bls = bls_map.get(ing_id)
-                weekly_qty, qty_unit = weekly_qty_map.get(ing_id, (None, unit or "unit"))
-                weekly_cost = price * weekly_qty if weekly_qty else None
-                if weekly_cost:
-                    total_weekly_cost += weekly_cost
+            if covered_ids:
+                bls_map_snapshot = {b.ingredient_id: b for b in session.query(USDAPrice).filter(
+                    USDAPrice.ingredient_id.in_(covered_ids)
+                ).all()}
+                weekly_qty_map_snapshot = {}
+                if ps["restaurant_id"]:
+                    recipe_ings_snapshot = session.query(RecipeIngredient).join(Recipe).filter(
+                        Recipe.restaurant_id == ps["restaurant_id"],
+                        RecipeIngredient.ingredient_id.in_(covered_ids),
+                    ).all()
+                    recipe_ids_snapshot = {ri.recipe_id for ri in recipe_ings_snapshot}
+                    recipes_map_snapshot = {r.id: r for r in session.query(Recipe).filter(
+                        Recipe.id.in_(recipe_ids_snapshot)
+                    ).all()} if recipe_ids_snapshot else {}
+                    ing_qty_map_snapshot = {
+                        iid: ingredients_map[iid]
+                        for iid in covered_ids
+                        if iid in ingredients_map
+                    }
+                    weekly_qty_map_snapshot = aggregate_quantities(
+                        recipe_ings_snapshot,
+                        baseline_weekly_covers,
+                        ing_qty_map_snapshot,
+                        recipes_map_snapshot,
+                        weekly_covers_by_category=category_weekly_covers or None,
+                    )
 
-                row = {
-                    "Ingredient": ing_name,
-                    "Category": ingredient_category_map.get(ing_id, "Other"),
-                    "Category Tag": category_tag(ingredient_category_map.get(ing_id, "Other")),
-                    "Best Distributor": dist_name,
-                    "Unit Price": f"${price:.2f}/{unit or 'unit'}",
-                    "Weekly Qty": f"{weekly_qty:.0f} {qty_unit}" if weekly_qty else "N/A",
-                    "Weekly Cost": f"${weekly_cost:.2f}" if weekly_cost else "N/A",
-                    "Wholesale Ref (50% BLS)": "N/A",
-                    "vs Market": "",
-                }
-                if bls and bls.price:
-                    wholesale_ref = bls.price * 0.5
-                    row["Wholesale Ref (50% BLS)"] = f"${wholesale_ref:.2f}/{bls.unit or 'unit'}"
-                    diff_pct = ((price - wholesale_ref) / wholesale_ref) * 100 if wholesale_ref else 0.0
-                    if diff_pct > 20:
-                        row["vs Market"] = f"+{diff_pct:.0f}%"
-                    elif diff_pct < -10:
-                        row["vs Market"] = f"{diff_pct:.0f}%"
-                    else:
-                        row["vs Market"] = "~ near wholesale ref"
-                best_rows.append(row)
-            st.dataframe(best_rows, use_container_width=True)
-
-            if total_weekly_cost > 0:
-                cost1, cost2 = st.columns(2)
-                cost1.metric("Estimated Weekly Total", f"${total_weekly_cost:,.2f}")
-                cost2.metric("Estimated Monthly Total", f"${total_weekly_cost * 4.33:,.2f}")
-
-            # ── Full comparison (expandable) ──
-            with st.expander("Full Quote Comparison (all distributors)", expanded=False):
-                comparison = []
-                for link in quoted_filtered:
-                    dist = distributors_map[link.distributor_id]
-                    ing = ingredients_map[link.ingredient_id]
-                    bls = bls_map.get(link.ingredient_id)
-
-                    if bls and bls.price and link.quoted_price:
-                        wholesale_ref = bls.price * 0.5
-                        bls_str = f"${wholesale_ref:.2f}/{bls.unit or 'unit'}"
-                        diff_pct = ((link.quoted_price - wholesale_ref) / wholesale_ref) * 100 if wholesale_ref else 0.0
-                        if diff_pct > 20:
-                            flag = f"+{diff_pct:.0f}% above wholesale ref"
-                        elif diff_pct < -10:
-                            flag = f"{diff_pct:.0f}% below wholesale ref"
-                        else:
-                            flag = "~ near wholesale ref"
-                    else:
-                        bls_str = "N/A"
-                        flag = ""
-
-                    comparison.append({
-                        "Distributor": dist.name,
+                best_price_rows = []
+                for iid in covered_ids:
+                    price, dist_id, unit = best_by_ingredient[iid]
+                    ing = ingredients_map.get(iid)
+                    dist = next((d for d in all_distributors if d.id == dist_id), None)
+                    if not ing or not dist:
+                        continue
+                    cat = ingredient_category_map.get(iid, "Other")
+                    bls = bls_map_snapshot.get(iid)
+                    weekly_qty, _ = weekly_qty_map_snapshot.get(iid, (None, unit or "unit"))
+                    weekly_delta = "N/A"
+                    if bls and bls.price and weekly_qty:
+                        bls_weekly_est = (bls.price * 0.5) * weekly_qty
+                        provider_weekly_est = price * weekly_qty
+                        diff = provider_weekly_est - bls_weekly_est
+                        sign = "+" if diff > 0 else ""
+                        weekly_delta = f"{sign}${diff:,.0f}"
+                    best_price_rows.append({
                         "Ingredient": ing.name,
-                        "Category": ingredient_category_map.get(link.ingredient_id, "Other"),
-                        "Category Tag": category_tag(ingredient_category_map.get(link.ingredient_id, "Other")),
-                        "Quoted Price": f"${link.quoted_price:.2f}",
-                        "Unit": link.quoted_unit or "N/A",
-                        "Wholesale Ref (50% BLS)": bls_str,
-                        "vs Market": flag,
-                        "Delivery": link.delivery_terms or "N/A",
+                        "Category": cat,
+                        "Category Tag": category_tag(cat),
+                        "Best Provider": dist.name,
+                        "Best Price": f"${price:.2f}/{unit or 'unit'}",
+                        "Weekly Δ vs BLS Est": weekly_delta,
                     })
-                st.dataframe(comparison, use_container_width=True)
+                best_price_rows.sort(key=lambda r: (r["Category"], r["Ingredient"]))
+                st.dataframe(best_price_rows, use_container_width=True)
 
-            # ── Items not supplied ──
-            not_supplied = session.query(DistributorIngredient).filter_by(
-                supply_status="does_not_supply"
-            ).all()
-            if selected_step5_categories:
-                not_supplied = [
-                    l for l in not_supplied
-                    if ingredient_category_map.get(l.ingredient_id, "Other") in selected_step5_categories
-                ]
-            if not_supplied:
-                ns_dist_ids = {l.distributor_id for l in not_supplied}
-                ns_ing_ids = {l.ingredient_id for l in not_supplied}
-                ns_dists = {d.id: d for d in session.query(Distributor).filter(
-                    Distributor.id.in_(ns_dist_ids)
-                ).all()}
-                ns_ings = {i.id: i for i in session.query(Ingredient).filter(
-                    Ingredient.id.in_(ns_ing_ids)
-                ).all()}
-                with st.expander(f"Items Not Supplied ({len(not_supplied)})", expanded=False):
-                    omitted_data = []
-                    for link in not_supplied:
-                        category = normalize_category_name(ns_ings[link.ingredient_id].category)
-                        omitted_data.append({
-                            "Distributor": ns_dists[link.distributor_id].name,
-                            "Ingredient": ns_ings[link.ingredient_id].name,
-                            "Category": category,
-                            "Category Tag": category_tag(category),
-                        })
-                    st.table(omitted_data)
+            if uncovered_ids:
+                missing_rows = []
+                for iid in uncovered_ids:
+                    ing = ingredients_map.get(iid)
+                    if not ing:
+                        continue
+                    cat = ingredient_category_map.get(iid, "Other")
+                    missing_rows.append({
+                        "Ingredient": ing.name,
+                        "Category": cat,
+                        "Category Tag": category_tag(cat),
+                    })
+                missing_rows.sort(key=lambda r: (r["Category"], r["Ingredient"]))
+                with st.expander(f"Ingredients Without A Provider Quote Yet ({len(missing_rows)})", expanded=False):
+                    st.table(missing_rows)
+
+        view_mode = st.radio(
+            "Step 5 View",
+            ["By Ingredient (Price Comparison)", "By Provider (Coverage Status)"],
+            horizontal=True,
+            key="step5_view_mode",
+        )
+
+        if view_mode == "By Provider (Coverage Status)":
+            if not filtered_links:
+                st.info("No provider items match the selected category filter.")
+            else:
+                status_order = {
+                    "needs_clarification": 0,
+                    "sent": 1,
+                    "completed": 2,
+                    "form_ready": 3,
+                    "skipped": 4,
+                    "failed": 5,
+                }
+                provider_rows = []
+                for dist in all_distributors:
+                    links = [l for l in filtered_links if l.distributor_id == dist.id]
+                    if not links:
+                        continue
+                    confirmed = [l for l in links if l.supply_status == "confirmed"]
+                    unconfirmed = [l for l in links if l.supply_status == "unconfirmed"]
+                    not_supplied = [l for l in links if l.supply_status == "does_not_supply"]
+                    provider_rows.append({
+                        "Provider": dist.name,
+                        "RFP Status": dist.rfp_status,
+                        "Confirmed": len(confirmed),
+                        "Unconfirmed": len(unconfirmed),
+                        "Not Supplied": len(not_supplied),
+                        "Coverage %": f"{(len(confirmed) / len(links) * 100):.0f}%" if links else "0%",
+                    })
+                provider_rows.sort(key=lambda r: (status_order.get(r["RFP Status"], 99), r["Provider"]))
+                st.dataframe(provider_rows, use_container_width=True)
+
+                for dist in all_distributors:
+                    links = [l for l in filtered_links if l.distributor_id == dist.id]
+                    if not links:
+                        continue
+                    confirmed = [l for l in links if l.supply_status == "confirmed"]
+                    unconfirmed = [l for l in links if l.supply_status == "unconfirmed"]
+                    not_supplied = [l for l in links if l.supply_status == "does_not_supply"]
+
+                    with st.expander(f"[{dist.rfp_status}] {dist.name}"):
+                        st.write(
+                            f"**Counts:** confirmed={len(confirmed)}, "
+                            f"unconfirmed={len(unconfirmed)}, "
+                            f"does_not_supply={len(not_supplied)}"
+                        )
+
+                        def _item_rows(items):
+                            rows = []
+                            for l in items:
+                                ing = ingredients_map.get(l.ingredient_id)
+                                if not ing:
+                                    continue
+                                cat = ingredient_category_map.get(l.ingredient_id, "Other")
+                                rows.append({
+                                    "Ingredient": ing.name,
+                                    "Category": cat,
+                                    "Category Tag": category_tag(cat),
+                                    "Quoted Price": f"${l.quoted_price:.2f}" if l.quoted_price is not None else "N/A",
+                                    "Unit": l.quoted_unit or "N/A",
+                                    "Delivery": l.delivery_terms or "N/A",
+                                })
+                            return rows
+
+                        st.markdown("**Confirmed**")
+                        st.table(_item_rows(confirmed) or [{"Ingredient": "None"}])
+                        st.markdown("**Unconfirmed**")
+                        st.table(_item_rows(unconfirmed) or [{"Ingredient": "None"}])
+                        st.markdown("**Does Not Supply**")
+                        st.table(_item_rows(not_supplied) or [{"Ingredient": "None"}])
         else:
-            st.info("No quotes received yet. Distributors may not have replied.")
+            # ── Quoted prices: ingredient-centric comparison ──
+            ingredient_ids_in_scope = sorted({l.ingredient_id for l in filtered_links})
+            if not ingredient_ids_in_scope:
+                st.info("No items in scope for the current category filter.")
+            else:
+                quoted = [l for l in filtered_links if l.quoted_price is not None]
+                dist_map = {d.id: d for d in all_distributors}
+                bls_map = {b.ingredient_id: b for b in session.query(USDAPrice).filter(
+                    USDAPrice.ingredient_id.in_(ingredient_ids_in_scope)
+                ).all()}
+
+                # Aggregate weekly quantities (for total and selected ingredient BLS estimate)
+                weekly_qty_map = {}
+                if ps["restaurant_id"]:
+                    recipe_ings = session.query(RecipeIngredient).join(Recipe).filter(
+                        Recipe.restaurant_id == ps["restaurant_id"],
+                        RecipeIngredient.ingredient_id.in_(ingredient_ids_in_scope),
+                    ).all()
+                    recipe_ids = {ri.recipe_id for ri in recipe_ings}
+                    recipes_map = {r.id: r for r in session.query(Recipe).filter(
+                        Recipe.id.in_(recipe_ids)
+                    ).all()} if recipe_ids else {}
+                    ing_qty_map = {iid: ingredients_map[iid] for iid in ingredient_ids_in_scope if iid in ingredients_map}
+                    weekly_qty_map = aggregate_quantities(
+                        recipe_ings,
+                        baseline_weekly_covers,
+                        ing_qty_map,
+                        recipes_map,
+                        weekly_covers_by_category=category_weekly_covers or None,
+                    )
+
+                # ── Best Prices (primary table) ──
+                st.subheader("Best Prices — Weekly Order Estimate")
+                st.caption("Market reference uses a wholesale proxy: 50% of BLS retail average.")
+                if not quoted:
+                    st.info("No quoted items for current category filter. Use the selector below to inspect provider status by ingredient.")
+                else:
+                    seen = {}
+                    for link in quoted:
+                        ing = ingredients_map[link.ingredient_id]
+                        if ing.name not in seen or (link.quoted_price and link.quoted_price < seen[ing.name][1]):
+                            dist = dist_map.get(link.distributor_id)
+                            if not dist:
+                                continue
+                            seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit, link.ingredient_id)
+                    best_rows = []
+                    total_weekly_cost = 0.0
+                    for ing_name, (dist_name, price, unit, ing_id) in seen.items():
+                        bls = bls_map.get(ing_id)
+                        weekly_qty, _ = weekly_qty_map.get(ing_id, (None, unit or "unit"))
+                        weekly_cost = price * weekly_qty if weekly_qty else None
+                        if weekly_cost:
+                            total_weekly_cost += weekly_cost
+
+                        market_flag = ""
+                        if bls and bls.price:
+                            wholesale_ref = bls.price * 0.5
+                            diff_pct = ((price - wholesale_ref) / wholesale_ref) * 100 if wholesale_ref else 0.0
+                            if diff_pct > 20:
+                                market_flag = f"+{diff_pct:.0f}%"
+                            elif diff_pct < -10:
+                                market_flag = f"{diff_pct:.0f}%"
+                            else:
+                                market_flag = "~ near wholesale ref"
+
+                        best_rows.append({
+                            "Category": ingredient_category_map.get(ing_id, "Other"),
+                            "Ingredient": ing_name,
+                            "Best Distributor": dist_name,
+                            "Unit Price": f"${price:.2f}/{unit or 'unit'}",
+                            "Weekly Cost": f"${weekly_cost:.2f}" if weekly_cost else "N/A",
+                            "vs Market": market_flag,
+                        })
+                    best_rows.sort(key=lambda r: (r["Category"], r["Ingredient"]))
+                    st.dataframe(best_rows, use_container_width=True)
+
+                    if total_weekly_cost > 0:
+                        cost1, cost2 = st.columns(2)
+                        cost1.metric("Estimated Weekly Total", f"${total_weekly_cost:,.2f}")
+                        cost2.metric("Estimated Monthly Total", f"${total_weekly_cost * 4.33:,.2f}")
+
+                # ── Ingredient -> Provider status matrix ──
+                ingredient_options = {
+                    f"{ingredients_map[iid].name} ({ingredient_category_map.get(iid, 'Other')})": iid
+                    for iid in ingredient_ids_in_scope
+                    if iid in ingredients_map
+                }
+                selected_ing_label = st.selectbox(
+                    "Inspect One Ingredient Across Providers",
+                    sorted(ingredient_options.keys()),
+                    key="step5_ing_provider_selector",
+                )
+                selected_ing_id = ingredient_options[selected_ing_label]
+                selected_ing = ingredients_map[selected_ing_id]
+                selected_ing_links = [l for l in filtered_links if l.ingredient_id == selected_ing_id]
+
+                bls = bls_map.get(selected_ing_id)
+                bls_est_str = "N/A"
+                if bls and bls.price:
+                    bls_est_str = f"${bls.price * 0.5:.2f}/{bls.unit or 'unit'}"
+                weekly_qty, weekly_unit = weekly_qty_map.get(selected_ing_id, (None, selected_ing.base_unit or "unit"))
+                weekly_bls_est = None
+                if bls and bls.price and weekly_qty:
+                    weekly_bls_est = (bls.price * 0.5) * weekly_qty
+
+                st.markdown(f"**BLS Estimated Cost ({selected_ing.name})**")
+                st.table([{
+                    "Ingredient": selected_ing.name,
+                    "Category": ingredient_category_map.get(selected_ing_id, "Other"),
+                    "Wholesale Ref (50% BLS)": bls_est_str,
+                    "Estimated Weekly Qty": f"{weekly_qty:.0f} {weekly_unit}" if weekly_qty else "N/A",
+                    "Estimated Weekly BLS Cost": f"${weekly_bls_est:,.0f}" if weekly_bls_est is not None else "N/A",
+                }])
+
+                provider_rows = []
+                for l in selected_ing_links:
+                    dist = dist_map.get(l.distributor_id)
+                    if not dist:
+                        continue
+                    if l.supply_status == "confirmed":
+                        provider_signal = "✅ Provides"
+                    elif l.supply_status == "does_not_supply":
+                        provider_signal = "❌ Confirmed No"
+                    else:
+                        provider_signal = "❓ May Provide"
+
+                    if dist.rfp_status in ("completed", "needs_clarification"):
+                        reply_signal = "📩 Replied"
+                    elif dist.rfp_status == "sent":
+                        reply_signal = "⏳ Yet To Reply"
+                    else:
+                        reply_signal = dist.rfp_status
+
+                    if dist.rating and dist.rating_count:
+                        weighted = dist.rating * min(dist.rating_count / 50, 1.0)
+                        rating_str = f"{dist.rating:.1f} ({dist.rating_count}) w:{weighted:.1f}"
+                    elif dist.rating:
+                        rating_str = f"{dist.rating:.1f}"
+                    else:
+                        rating_str = "N/A"
+
+                    provider_rows.append({
+                        "Provider": dist.name,
+                        "Reply": reply_signal,
+                        "Supply Status": provider_signal,
+                        "Rating": rating_str,
+                        "Quoted Price": f"${l.quoted_price:.2f}/{l.quoted_unit or 'unit'}" if l.quoted_price is not None else "N/A",
+                        "Delivery Terms": l.delivery_terms or "N/A",
+                    })
+                provider_rows.sort(key=lambda r: (r["Supply Status"], r["Provider"]))
+                st.dataframe(provider_rows, use_container_width=True)
     finally:
         session.close()
 
