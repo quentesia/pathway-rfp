@@ -35,7 +35,8 @@ def get_bls_match_prompt(bls_list: str, ingredients_list: str, schema_json: str)
 
 RULES:
 - Only match if the BLS item is a reasonable price proxy for the ingredient. The price market trends
-  should be expected to follow the one of the BLS item.
+  should be expected to follow the one of the BLS item. If its even loosely similar, match it. 
+  If they fall in the same bracket of food type like condiments etc., match it.
 - "Eggplant" should NOT match "Eggs" — they are completely different foods
 - "Chicken Stock" or "Beef Stock" are liquid products — do NOT match to raw meat prices
 - "Red Wine Vinegar" is vinegar, NOT wine — do not match to wine

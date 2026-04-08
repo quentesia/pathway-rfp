@@ -441,7 +441,7 @@ def _keyword_match(ingredient_name: str) -> tuple | None:
     return None
 
 
-def run_step2(session: Session) -> list[USDAPrice]:
+def fetch_market_trends(session: Session) -> list[USDAPrice]:
     """
     Full Step 2 pipeline:
     1. Check bls_cache.db for this month's data (persists across pipeline DB resets)

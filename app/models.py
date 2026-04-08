@@ -21,6 +21,7 @@ class Restaurant(Base):
     name = Column(String, nullable=False)
     location = Column(String)
     menu_source_url = Column(String)
+    menu_hash = Column(String, index=True)
     created_at = Column(Date, default=_today)
     
     rfp_emails = relationship("RFPEmail", back_populates="restaurant")

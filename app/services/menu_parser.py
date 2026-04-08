@@ -7,6 +7,7 @@ Pydantic validates the response matches our schema exactly.
 import json
 import os
 import base64
+import hashlib
 from pathlib import Path
 
 import anthropic
@@ -71,14 +72,21 @@ _SCHEMA_JSON = json.dumps(MenuParseResult.model_json_schema(), indent=2)
 
 def parse_menu_image(image_path: str) -> MenuParseResult:
     """Send menu photo to Claude, get back validated recipes."""
-    path = Path(image_path)
-    media_type = {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png", ".webp": "image/webp",
-    }.get(path.suffix.lower(), "image/jpeg")
+    with open(image_path, "rb") as f:
+        file_bytes = f.read()
 
-    with open(path, "rb") as f:
-        image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+    # Read magic bytes to determine true MIME type
+    if file_bytes.startswith(b'\xff\xd8'):
+        media_type = "image/jpeg"
+    elif file_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        media_type = "image/png"
+    elif file_bytes.startswith(b'RIFF') and file_bytes[8:12] == b'WEBP':
+        media_type = "image/webp"
+    else:
+        # Fallback 
+        media_type = "image/jpeg"
+
+    image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -166,11 +174,29 @@ def store_parsed_recipes(
 def parse_menu(session: Session, restaurant_name: str,
                menu_image_path: str, location: str = "",
                menu_url: str = "") -> tuple[Restaurant, list[Recipe]]:
-    """Menu photo → Claude vision → validated recipes → DB."""
+    """Menu photo → Claude vision → validated recipes → DB.
+
+    Returns (restaurant, recipes). Skips Claude if this exact image
+    was already parsed (matched by SHA-256 hash).
+    """
+    # Compute image hash for duplicate detection
+    with open(menu_image_path, "rb") as f:
+        image_bytes = f.read()
+    menu_hash = hashlib.sha256(image_bytes).hexdigest()
+
+    # Check if this exact image was already parsed
+    existing = session.query(Restaurant).filter_by(menu_hash=menu_hash).first()
+    if existing:
+        recipes = session.query(Recipe).filter_by(restaurant_id=existing.id).all()
+        if recipes:
+            print(f"  Menu already parsed — found {len(recipes)} recipes (hash match)")
+            return existing, recipes
+
     restaurant = Restaurant(
         name=restaurant_name,
         location=location,
         menu_source_url=menu_url,
+        menu_hash=menu_hash,
     )
     session.add(restaurant)
     session.flush()

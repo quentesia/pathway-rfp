@@ -14,11 +14,11 @@ from app.models import (
     USDAPrice, Distributor, DistributorIngredient,
     RFPEmail, RFPQuote,
 )
-from app.services.menu_parser import run_step1
-from app.services.usda_client import run_step2
-from app.services.distributor_finder import run_step3
-from app.services.email_sender import run_step4
-from app.services.inbox_monitor import run_step5
+from app.services.menu_parser import parse_menu
+from app.services.usda_client import fetch_market_trends
+from app.services.distributor_finder import find_local_distributors
+from app.services.email_sender import send_rfp_emails
+from app.services.inbox_monitor import collect_quotes
 
 load_dotenv()
 init_db()
@@ -62,8 +62,9 @@ with input_tab1:
     uploaded_file = st.file_uploader("Upload menu photo", type=["png", "jpg", "jpeg", "webp"])
     if uploaded_file:
         import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            tmp.write(uploaded_file.read())
+        ext = Path(uploaded_file.name).suffix or ".jpg"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(uploaded_file.getvalue())
             menu_image_path = tmp.name
         st.image(uploaded_file, caption="Uploaded menu", use_container_width=True)
 
@@ -77,13 +78,16 @@ with input_tab2:
 
 has_input = bool(menu_text) or menu_image_path is not None
 
-if st.button("Run Step 1: Parse Menu", disabled=not has_input):
-    with st.spinner("Parsing menu with LLM..." + (" (running OCR first)" if menu_image_path else "")):
+if st.button("Parse Menu", disabled=not has_input):
+    with st.spinner("Parsing menu into structured recipes..."):
         session = SessionLocal()
         try:
-            restaurant, recipes = run_step1(
-                session, menu_text, restaurant_name, restaurant_location, menu_url,
+            restaurant, recipes = parse_menu(
+                session,
+                restaurant_name=restaurant_name,
                 menu_image_path=menu_image_path,
+                location=restaurant_location,
+                menu_url=menu_url,
             )
             ps["restaurant_id"] = restaurant.id
             ps["step1_done"] = True
@@ -119,13 +123,14 @@ if ps["step1_done"]:
 st.header("Step 2: Market Price Trends")
 st.markdown("Fetches recent consumer price data from the BLS Average Price Data API to gauge ingredient costs.")
 
-if st.button("Run Step 2: Fetch Price Trends", disabled=not ps["step1_done"]):
-    with st.spinner("Querying BLS Average Price Data API..."):
+if st.button("Fetch Market Trends", disabled=not ps["step1_done"]):
+    with st.spinner("Fetching market price trends from BLS API..."):
         session = SessionLocal()
         try:
-            records = run_step2(session)
+            total_ingredients = session.query(Ingredient).count()
+            records = fetch_market_trends(session)
             ps["step2_done"] = True
-            st.success(f"Fetched price data for {len(records)} ingredients!")
+            st.success(f"Fetched price data for {len(records)} out of {total_ingredients} ingredients!")
         except Exception as e:
             st.error(str(e))
         finally:
@@ -159,11 +164,11 @@ if ps["step2_done"]:
 st.header("Step 3: Find Local Distributors")
 st.markdown("Searches for food distributors in the restaurant's area.")
 
-if st.button("Run Step 3: Find Distributors", disabled=not ps["step1_done"]):
+if st.button("Find Distributors", disabled=not ps["step1_done"]):
     with st.spinner("Searching for distributors..."):
         session = SessionLocal()
         try:
-            distributors = run_step3(session, restaurant_location)
+            distributors = find_local_distributors(session, restaurant_location)
             ps["step3_done"] = True
             st.success(f"Found {len(distributors)} distributors!")
         finally:
@@ -188,7 +193,7 @@ if ps["step3_done"]:
                     ing = session.query(Ingredient).get(link.ingredient_id)
                     ing_names.append(ing.name)
                 if ing_names:
-                    st.write(f"**Supplies:** {', '.join(ing_names)}")
+                    st.write(f"**Possible Supplies:** {', '.join(ing_names)}")
     finally:
         session.close()
 
@@ -197,14 +202,14 @@ if ps["step3_done"]:
 st.header("Step 4: Send RFP Emails")
 st.markdown("Composes and sends RFP emails to each distributor requesting price quotes.")
 
-if st.button("Run Step 4: Send Emails", disabled=not ps["step3_done"]):
+if st.button("Send Emails", disabled=not ps["step3_done"]):
     if not mock_email:
         st.warning("Set a mock email address in the sidebar for demo mode.")
     else:
         with st.spinner("Sending RFP emails..."):
             session = SessionLocal()
             try:
-                emails = run_step4(
+                emails = send_rfp_emails(
                     session, ps["restaurant_id"], mock_recipient=mock_email
                 )
                 ps["step4_done"] = True
@@ -235,11 +240,11 @@ if ps["step4_done"]:
 st.header("Step 5: Collect & Compare Quotes (Nice-to-have)")
 st.markdown("Monitors inbox for distributor replies, parses quotes, and compiles a comparison.")
 
-if st.button("Run Step 5: Check Inbox", disabled=not ps["step4_done"]):
+if st.button("Check Inbox", disabled=not ps["step4_done"]):
     with st.spinner("Monitoring inbox for replies..."):
         session = SessionLocal()
         try:
-            quotes = run_step5(session, ps["restaurant_id"])
+            quotes = collect_quotes(session, ps["restaurant_id"])
             ps["step5_done"] = True
             st.success(f"Parsed {len(quotes)} quotes from replies!")
         finally:
