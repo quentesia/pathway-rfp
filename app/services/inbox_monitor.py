@@ -123,6 +123,7 @@ def collect_quotes(
     restaurant_id: int,
     mock_recipient: str | None = None,
     mock_replies: list[dict] | None = None,
+    on_status: callable = None,
 ) -> list[DistributorIngredient]:
     """
     Full Step 5 pipeline:
@@ -132,31 +133,36 @@ def collect_quotes(
     4. If all ingredients quoted → thank you reply, mark completed
     5. If some missing → follow-up reply, mark needs_clarification
     """
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
     service = get_gmail_service()
     restaurant = session.get(Restaurant, restaurant_id)
 
     if mock_replies is not None:
-        print("Using mock replies for testing...")
+        _status("Using mock replies for testing...")
         replies = mock_replies
     else:
         after_date = None
         if restaurant and restaurant.last_inbox_check:
             after_date = restaurant.last_inbox_check.strftime("%Y/%m/%d")
-            print(f"Checking inbox for RFP replies after {after_date}...")
+            _status(f"Checking inbox for replies after {after_date}...")
         else:
-            print("Checking inbox for RFP replies (first run)...")
+            _status("Checking inbox for RFP replies (first scan)...")
         replies = get_reply_messages(service, after_date=after_date)
 
     if not replies:
-        print("  No replies found yet.")
+        _status("No replies found yet.")
         return []
 
-    print(f"  Found {len(replies)} potential replies.")
+    _status(f"Found {len(replies)} potential replies. Processing...")
     updated_links = []
     sender = os.getenv("GMAIL_SENDER", "me")
 
-    for reply in replies:
-        print(f"  Processing reply from: {reply['from']}")
+    for i, reply in enumerate(replies, 1):
+        _status(f"[{i}/{len(replies)}] Processing reply from: {reply['from']}")
 
         # Match reply to a distributor
         distributor = None
@@ -175,11 +181,11 @@ def collect_quotes(
                     break
 
         if not distributor:
-            print("    Could not match reply to a known distributor.")
+            _status(f"  Could not match reply to a known distributor, skipping.")
             continue
 
         if distributor.rfp_status == "completed":
-            print(f"    Already completed for {distributor.name}, skipping.")
+            _status(f"  Already completed for {distributor.name}, skipping.")
             continue
 
         # Get this distributor's ingredient links
@@ -188,9 +194,12 @@ def collect_quotes(
         ).all()
         requested_names = [l.ingredient.name for l in links]
 
+        _status(f"  Parsing quote from {distributor.name} with AI...")
         parsed = parse_quote_from_email(reply["body"], requested_names)
         if not parsed:
+            _status(f"  Could not parse quote from {distributor.name}.")
             continue
+        _status(f"  Parsed: {len(parsed.quotes)} priced, {len(parsed.not_supplied)} not supplied, {len(parsed.clarification_needed)} need clarification")
 
         # Update DistributorIngredient rows with quoted prices
         for q in parsed.quotes:
@@ -222,15 +231,13 @@ def collect_quotes(
         subject = f"Re: Request for Proposal — {distributor.name}"
 
         if not needs_clarification:
-            # All done — send thank you
             distributor.rfp_status = "completed"
-            print(f"    All items quoted for {distributor.name} — sending thank you")
+            _status(f"  {distributor.name}: all items quoted — sending thank you")
             body = _compose_thank_you(distributor.name)
             send_email(service, sender, to_email, subject, body)
         else:
-            # Missing items — send follow-up
             distributor.rfp_status = "needs_clarification"
-            print(f"    {len(needs_clarification)} items need clarification from {distributor.name}")
+            _status(f"  {distributor.name}: {len(needs_clarification)} items need clarification — sending follow-up")
             body = _compose_followup(distributor.name, needs_clarification)
             send_email(service, sender, to_email, subject, body)
 

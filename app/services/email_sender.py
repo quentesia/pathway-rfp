@@ -422,6 +422,7 @@ def send_rfp_emails(
     mock_recipient: str | None = None,
     submit_forms: bool = False,
     weekly_covers: int = 40,
+    on_status: callable = None,
 ) -> list[Distributor]:
     """
     Full Step 4 pipeline:
@@ -433,28 +434,34 @@ def send_rfp_emails(
     If mock_recipient is set, all emails go to yopmail addresses instead.
     If submit_forms is False, forms are filled and verified but not actually submitted.
     """
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
     restaurant = session.get(Restaurant, restaurant_id)
     if not restaurant:
-        print(f"Restaurant {restaurant_id} not found.")
+        _status(f"Restaurant {restaurant_id} not found.")
         return []
 
     distributors = session.query(Distributor).all()
     if not distributors:
-        print("No distributors found. Run Step 3 first.")
+        _status("No distributors found. Run Step 3 first.")
         return []
 
     sender = os.getenv("GMAIL_SENDER", "")
     if not sender:
-        print("GMAIL_SENDER not set. Set it in .env")
+        _status("GMAIL_SENDER not set. Set it in .env")
         return []
 
+    _status(f"Preparing RFPs for {len(distributors)} distributors...")
     service = get_gmail_service()
     processed = []
     sent_count = 0
     form_count = 0
     skipped_count = 0
 
-    for dist in distributors:
+    for i, dist in enumerate(distributors, 1):
         ingredients_with_info = _get_ingredients_for_distributor(session, dist, restaurant_id, weekly_covers)
         if not ingredients_with_info:
             continue
@@ -466,7 +473,7 @@ def send_rfp_emails(
 
         if has_email:
             recipient = _make_yopmail(dist.name) if mock_recipient else dist.email
-            print(f"  Emailing {dist.name} ({recipient})...")
+            _status(f"[{i}/{len(distributors)}] Emailing {dist.name} ({recipient})...")
             msg_id = send_email(service, sender, recipient, subject, body)
             if msg_id:
                 dist.rfp_status = "sent"
@@ -477,7 +484,7 @@ def send_rfp_emails(
 
         elif has_form:
             form_url = dist.email[5:]
-            print(f"  Submitting form for {dist.name} ({form_url})...")
+            _status(f"[{i}/{len(distributors)}] Submitting contact form for {dist.name}...")
             success = _submit_contact_form(form_url, body, sender, submit=submit_forms)
             if success:
                 dist.rfp_status = "form_ready" if not submit_forms else "sent"
@@ -487,13 +494,12 @@ def send_rfp_emails(
                 dist.rfp_status = "form_failed"
 
         else:
-            print(f"  Skipping {dist.name} — phone only")
+            _status(f"[{i}/{len(distributors)}] Skipping {dist.name} — phone only")
             dist.rfp_status = "skipped"
             skipped_count += 1
 
         processed.append(dist)
 
     session.commit()
-    total = len(processed)
-    print(f"Step 4 complete: {sent_count} emailed, {form_count} forms, {skipped_count} skipped (phone only) — {total} total")
+    _status(f"Done — {sent_count} emailed, {form_count} forms, {skipped_count} skipped.")
     return processed

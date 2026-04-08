@@ -212,20 +212,26 @@ def scrape_email_from_website(url: str) -> str | None:
 
 # ── Orchestration ────────────────────────────────────────────────────────────
 
-def find_distributors(location: str, categories: list[str]) -> list[dict]:
+def find_distributors(location: str, categories: list[str],
+                      on_status: callable = None) -> list[dict]:
     """
     Find distributors using SerpAPI, with an LLM inference fallback.
     """
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
     serper_key = os.getenv("SERPER_API_KEY") or os.getenv("SERPAPI_KEY")
 
     if serper_key:
-        print("  Using Serper API...")
+        _status("Using Serper API to search Google Places...")
         all_results = {}
-        for cat in categories:
+        for i, cat in enumerate(categories, 1):
+            _status(f"Searching [{i}/{len(categories)}]: {cat} distributors near {location}...")
             query = f"{cat} wholesale distributor supplier near {location}"
             results = search_serper_api(location, query, serper_key, category=cat)
-            
-            # Take top 3 for each category to keep it concise
+
             for r in results[:3]:
                 name_key = r["name"].lower()
                 if name_key not in all_results:
@@ -237,16 +243,17 @@ def find_distributors(location: str, categories: list[str]) -> list[dict]:
 
         if all_results:
             final_list = list(all_results.values())
-            print("  Scraping distributor websites for real contact emails...")
-            for d in final_list:
+            _status(f"Found {len(final_list)} distributors. Scraping websites for contact emails...")
+            for j, d in enumerate(final_list, 1):
                 if d.get("website") and not d.get("email"):
+                    _status(f"Scraping [{j}/{len(final_list)}]: {d['name']}...")
                     scraped_email = scrape_email_from_website(d["website"])
                     if scraped_email:
                         d["email"] = scraped_email
             return final_list
-        print("  No Serper results.")
+        _status("No Serper results.")
 
-    print("  Using LLM inference fallback...")
+    _status("Using Claude to find distributors (LLM fallback)...")
     return search_llm_fallback(location, categories)
 
 
@@ -383,7 +390,8 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
         print(f"  AI email fallback failed: {e}")
 
 
-def find_local_distributors(session: Session, location: str, restaurant_id: int = None) -> list[Distributor]:
+def find_local_distributors(session: Session, location: str, restaurant_id: int = None,
+                            on_status: callable = None) -> list[Distributor]:
     """
     Full Step 3 pipeline:
     1. Gather all ingredient categories from DB
@@ -391,27 +399,35 @@ def find_local_distributors(session: Session, location: str, restaurant_id: int 
     3. Store and link to ingredients
     4. AI fallback for missing emails
     """
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
     if restaurant_id:
         ingredients = session.query(Ingredient).filter_by(restaurant_id=restaurant_id).all()
     else:
         ingredients = session.query(Ingredient).all()
     if not ingredients:
-        print("No ingredients found. Run Step 1 first.")
+        _status("No ingredients found. Run Step 1 first.")
         return []
 
     categories = list({ing.category or "Other" for ing in ingredients})
-    print(f"Finding distributors in {location} for categories: {categories}")
+    _status(f"Searching for distributors in {location} across {len(categories)} categories...")
 
-    distributor_data = find_distributors(location, categories)
+    distributor_data = find_distributors(location, categories, on_status=on_status)
     if not distributor_data:
-        print("  No distributors found.")
+        _status("No distributors found.")
         return []
 
-    print(f"  Found {len(distributor_data)} distributors. Storing...")
+    _status(f"Found {len(distributor_data)} distributors. Storing and linking to ingredients...")
     distributors = store_distributors(session, distributor_data, ingredients)
 
-    # AI fallback for distributors with website but no email
+    missing_email = [d for d in distributors if d.website and not d.email]
+    if missing_email:
+        _status(f"Using AI to look up emails for {len(missing_email)} distributors...")
     _ai_email_fallback(session, distributors)
 
-    print(f"Step 3 complete: {len(distributors)} distributors stored.")
+    with_email = sum(1 for d in distributors if d.email and not d.email.startswith("form:"))
+    _status(f"Done — {len(distributors)} distributors stored, {with_email} with email.")
     return distributors

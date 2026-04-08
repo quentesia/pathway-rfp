@@ -174,23 +174,28 @@ def store_parsed_recipes(
 
 def parse_menu(session: Session, restaurant_name: str,
                menu_image_path: str, location: str = "",
-               menu_url: str = "") -> tuple[Restaurant, list[Recipe]]:
+               menu_url: str = "",
+               on_status: callable = None) -> tuple[Restaurant, list[Recipe]]:
     """Menu photo → Claude vision → validated recipes → DB.
 
     Returns (restaurant, recipes). Skips Claude if this exact image
     was already parsed (matched by SHA-256 hash).
     """
-    # Compute image hash for duplicate detection
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
+    _status("Computing image hash for duplicate detection...")
     with open(menu_image_path, "rb") as f:
         image_bytes = f.read()
     menu_hash = hashlib.sha256(image_bytes).hexdigest()
 
-    # Check if this exact image was already parsed
     existing = session.query(Restaurant).filter_by(menu_hash=menu_hash).first()
     if existing:
         recipes = session.query(Recipe).filter_by(restaurant_id=existing.id).all()
         if recipes:
-            print(f"  Menu already parsed — found {len(recipes)} recipes (hash match)")
+            _status(f"Menu already parsed — found {len(recipes)} recipes (hash match)")
             return existing, recipes
 
     restaurant = Restaurant(
@@ -201,14 +206,15 @@ def parse_menu(session: Session, restaurant_name: str,
     )
     session.add(restaurant)
     session.flush()
-    print(f"Created restaurant: {restaurant.name} (id={restaurant.id})")
+    _status(f"Created restaurant: {restaurant.name} (id={restaurant.id})")
 
-    print(f"Sending menu photo to Claude: {menu_image_path}")
+    _status("Sending menu photo to Claude for parsing (this may take 1-2 min)...")
     result = parse_menu_image(menu_image_path)
 
     all_ing_names = {ing.name for r in result.recipes for ing in r.ingredients}
-    print(f"  Parsed {len(result.recipes)} recipes, {len(all_ing_names)} unique ingredients")
+    _status(f"Parsed {len(result.recipes)} recipes, {len(all_ing_names)} unique ingredients")
 
+    _status("Storing recipes and ingredients to database...")
     recipes = store_parsed_recipes(session, restaurant.id, result)
-    print(f"Menu parsing complete: {len(recipes)} recipes stored.")
+    _status(f"Done — {len(recipes)} recipes stored.")
     return restaurant, recipes

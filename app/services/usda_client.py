@@ -430,46 +430,49 @@ def _keyword_match(ingredient_name: str) -> tuple | None:
     return None
 
 
-def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USDAPrice]:
+def fetch_market_trends(session: Session, restaurant_id: int = None,
+                        on_status: callable = None) -> list[USDAPrice]:
     """
     Full Step 2 pipeline:
     1. Check bls_cache table for this month's data (persists across pipeline resets)
     2. If cache miss, make ONE batch BLS API call and store in cache
     3. Match ingredients to cached series and write USDAPrice records
     """
+    def _status(msg):
+        print(f"  {msg}")
+        if on_status:
+            on_status(msg)
+
     if restaurant_id:
         ingredients = session.query(Ingredient).filter_by(restaurant_id=restaurant_id).all()
     else:
         ingredients = session.query(Ingredient).all()
     if not ingredients:
-        print("No ingredients found. Run Step 1 first.")
+        _status("No ingredients found. Run Step 1 first.")
         return []
+
+    _status(f"Found {len(ingredients)} ingredients. Checking BLS price cache...")
 
     # ── Check / populate the persistent BLS cache ────────────────────────
     cached = _get_cached_data(session)
 
     if cached:
-        print(f"Step 2: Using cached BLS data ({len(cached)} series, "
-              f"fetched {date.today().strftime('%B %Y')}).")
+        _status(f"Using cached BLS data ({len(cached)} series).")
     else:
-        # Need to fetch from BLS API
         all_series_ids = list({s[0] for s in BLS_FOOD_SERIES})
         current_year = datetime.now().year
-        print(f"Fetching BLS price data for {len(all_series_ids)} food series "
-              f"({current_year - 1}–{current_year})...")
+        _status(f"Fetching BLS price data for {len(all_series_ids)} food series from API (may take 30-60s)...")
         bls_data = _fetch_bls_prices(all_series_ids, current_year - 1, current_year)
 
-        # Build a lookup from series_id -> (description, unit)
         series_info = {s[0]: (s[1], s[2]) for s in BLS_FOOD_SERIES}
 
-        # Save each series to cache
         cached = {}
         for series_id, data_points in bls_data.items():
             desc, unit = series_info.get(series_id, ("Unknown", ""))
             _save_to_cache(session, series_id, desc, unit, data_points)
             cached[series_id] = {"description": desc, "unit": unit, "data": data_points}
         session.commit()
-        print(f"  Cached {len(cached)} series to bls_cache")
+        _status(f"Cached {len(cached)} series to database.")
 
     # ── Clear any old USDAPrice rows (pipeline DB may have been reset) ───
     session.query(USDAPrice).delete()
@@ -481,7 +484,7 @@ def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USD
     already_matched = [ing for ing in ingredients if ing.usda_id]
 
     if already_matched:
-        print(f"  {len(already_matched)} ingredients already have BLS IDs")
+        _status(f"{len(already_matched)} ingredients already have BLS IDs.")
 
     # Build the match map from existing + new Claude matches
     # Deduplicated lookup for series_id -> (series_id, description, unit)
@@ -492,6 +495,7 @@ def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USD
         match_map[ing.name] = series_lookup.get(ing.usda_id)
 
     if needs_matching:
+        _status(f"Matching {len(needs_matching)} ingredients to BLS series with AI...")
         claude_matches = _match_ingredients_with_claude([ing.name for ing in needs_matching])
         match_map.update(claude_matches)
         # Persist usda_id on each ingredient
@@ -501,11 +505,11 @@ def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USD
                 ing.usda_id = match[0]  # series_id
         session.flush()
 
+    _status("Writing price records...")
     records = []
     for ing in ingredients:
         match = match_map.get(ing.name)
         if not match:
-            print(f"  No BLS price match for '{ing.name}' — skipping")
             continue
 
         series_id, _, _ = match
@@ -556,6 +560,7 @@ def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USD
         print(f"  {ing.name} → '{description}' | ${price_val:.2f} {unit} ({date_str}) {trend_note}")
 
     session.commit()
-    print(f"Step 2 complete: {len(records)} price records stored.")
+    unmatched = len(ingredients) - len(records)
+    _status(f"Done — {len(records)} price records stored, {unmatched} ingredients had no BLS match.")
     return records
 
