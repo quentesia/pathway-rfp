@@ -8,6 +8,7 @@ Your job: for EVERY dish on the menu, produce a complete recipe with
 realistic ingredients and quantities for ONE serving.
 
 CRITICAL RULES:
+- ONLY include dishes that are clearly visible and readable on the menu. Do NOT invent or hallucinate dishes.
 - Include ALL dishes visible on the menu. Do not skip any.
 - Use the dish description from the menu as-is for the "description" field.
 - DEDUPLICATE ingredients: if multiple dishes use the same ingredient,

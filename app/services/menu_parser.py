@@ -94,6 +94,7 @@ def parse_menu_image(image_path: str) -> MenuParseResult:
     response = client.messages.create(
         model=MODEL,
         max_tokens=16384,
+        temperature=0,
         system=get_menu_parse_prompt(_SCHEMA_JSON),
         messages=[{
             "role": "user",
@@ -140,10 +141,12 @@ def store_parsed_recipes(
 
         for ing in entry.ingredients:
             db_ingredient = session.query(Ingredient).filter(
-                Ingredient.name == ing.name
+                Ingredient.name == ing.name,
+                Ingredient.restaurant_id == restaurant_id,
             ).first()
             if not db_ingredient:
                 db_ingredient = Ingredient(
+                    restaurant_id=restaurant_id,
                     name=ing.name,
                     category=ing.category,
                     base_unit=ing.unit,

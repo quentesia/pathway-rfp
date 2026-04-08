@@ -69,7 +69,7 @@ def compose_rfp_body(
     lines = []
     for ing, usda_name, unit, qty, qty_unit in ingredients_with_info:
         if qty:
-            lines.append(f"  - {ing.name} — est. {qty:.0f} {qty_unit}")
+            lines.append(f"  - {ing.name} — est. {qty:.0f} {qty_unit}/week")
         else:
             lines.append(f"  - {ing.name}")
 
@@ -370,10 +370,12 @@ def _make_yopmail(distributor_name: str) -> str:
 
 def _get_ingredients_for_distributor(
     session: Session, dist: Distributor, restaurant_id: int,
+    weekly_covers: int = 40,
 ) -> list[tuple]:
     """Get linked ingredients with USDA reference data and aggregated quantities.
 
     Returns list of (Ingredient, usda_match_name, unit, total_qty, qty_unit).
+    Quantities are per-serving × weekly_covers, summed across all recipes.
     """
     links = session.query(DistributorIngredient).filter_by(
         distributor_id=dist.id
@@ -386,18 +388,17 @@ def _get_ingredients_for_distributor(
         Ingredient.id.in_(ing_ids)
     ).all()}
 
-    # Aggregate quantities: per-serving qty × estimated_servings, summed across recipes
-    recipe_ings = session.query(RecipeIngredient, Recipe.estimated_servings).join(Recipe).filter(
+    # Aggregate quantities: per-serving qty × weekly_covers, summed across recipes
+    recipe_ings = session.query(RecipeIngredient).join(Recipe).filter(
         Recipe.restaurant_id == restaurant_id,
         RecipeIngredient.ingredient_id.in_(ing_ids),
     ).all()
     qty_map = {}
-    for ri, servings in recipe_ings:
-        multiplier = servings or 1
+    for ri in recipe_ings:
         if ri.ingredient_id not in qty_map:
             qty_map[ri.ingredient_id] = (0.0, ri.unit)
         total, unit = qty_map[ri.ingredient_id]
-        qty_map[ri.ingredient_id] = (total + ri.quantity * multiplier, unit)
+        qty_map[ri.ingredient_id] = (total + ri.quantity * weekly_covers, unit)
 
     usda_map = {u.ingredient_id: u for u in session.query(USDAPrice).filter(
         USDAPrice.ingredient_id.in_(ing_ids)
@@ -420,6 +421,7 @@ def send_rfp_emails(
     restaurant_id: int,
     mock_recipient: str | None = None,
     submit_forms: bool = False,
+    weekly_covers: int = 40,
 ) -> list[Distributor]:
     """
     Full Step 4 pipeline:
@@ -453,7 +455,7 @@ def send_rfp_emails(
     skipped_count = 0
 
     for dist in distributors:
-        ingredients_with_info = _get_ingredients_for_distributor(session, dist, restaurant_id)
+        ingredients_with_info = _get_ingredients_for_distributor(session, dist, restaurant_id, weekly_covers)
         if not ingredients_with_info:
             continue
 

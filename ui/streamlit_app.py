@@ -71,6 +71,11 @@ with st.sidebar:
     restaurant_name = st.text_input("Restaurant Name", "My Restaurant")
     restaurant_location = st.text_input("Location", "Atlanta, GA")
     menu_url = st.text_input("Menu Source URL (optional)", "")
+    weekly_covers = st.number_input(
+        "Est. weekly covers per dish",
+        min_value=1, max_value=500, value=40,
+        help="How many times each dish is ordered per week. Used to estimate procurement quantities.",
+    )
 
 # ── Session state ────────────────────────────────────────────────────────────
 
@@ -196,8 +201,8 @@ if _s2_run:
     with st.spinner("Fetching market price trends from BLS API..."):
         session = SessionLocal()
         try:
-            total_ingredients = session.query(Ingredient).count()
-            records = fetch_market_trends(session)
+            total_ingredients = session.query(Ingredient).filter_by(restaurant_id=ps["restaurant_id"]).count()
+            records = fetch_market_trends(session, restaurant_id=ps["restaurant_id"])
             ps["step2_done"] = True
             st.success(f"Fetched price data for {len(records)} out of {total_ingredients} ingredients!")
         except Exception as e:
@@ -252,7 +257,7 @@ if _s3_run:
     with st.spinner("Searching for distributors..."):
         session = SessionLocal()
         try:
-            distributors = find_local_distributors(session, restaurant_location)
+            distributors = find_local_distributors(session, restaurant_location, restaurant_id=ps["restaurant_id"])
             ps["step3_done"] = True
             with_email = sum(1 for d in distributors if d.email and not d.email.startswith("form:"))
             with_form = sum(1 for d in distributors if d.email and d.email.startswith("form:"))
@@ -340,7 +345,8 @@ if _s4_run:
         session = SessionLocal()
         try:
             processed = send_rfp_emails(
-                session, ps["restaurant_id"], mock_recipient="demo"
+                session, ps["restaurant_id"], mock_recipient="demo",
+                weekly_covers=weekly_covers,
             )
             ps["step4_done"] = True
             sent = sum(1 for d in processed if d.rfp_status == "sent")
@@ -381,9 +387,9 @@ if ps["step4_done"]:
     finally:
         session.close()
 
-# ── Step 5: Collect & Compare Quotes (Nice-to-have) ─────────────────────────
+# ── Step 5: Collect & Compare Quotes ─────────────────────────
 
-st.header("Step 5: Collect & Compare Quotes (Nice-to-have)")
+st.header("Step 5: Collect & Compare Quotes")
 st.markdown("Monitors inbox for distributor replies, parses quotes, and compiles a comparison.")
 
 _s5_has_existing = existing.get("step5") and not ps["step5_done"]
@@ -466,7 +472,21 @@ if ps["step5_done"]:
             st.dataframe(comparison, use_container_width=True)
 
             # Best price per ingredient
-            st.subheader("Best Prices")
+            st.subheader("Best Prices — Weekly Order Estimate")
+
+            # Aggregate weekly quantities: per-serving qty × weekly_covers, summed across recipes
+            weekly_qty_map = {}
+            if ps["restaurant_id"]:
+                recipe_ings = session.query(RecipeIngredient).join(Recipe).filter(
+                    Recipe.restaurant_id == ps["restaurant_id"],
+                    RecipeIngredient.ingredient_id.in_(list(ing_ids)),
+                ).all()
+                for ri in recipe_ings:
+                    if ri.ingredient_id not in weekly_qty_map:
+                        weekly_qty_map[ri.ingredient_id] = (0.0, ri.unit)
+                    total, u = weekly_qty_map[ri.ingredient_id]
+                    weekly_qty_map[ri.ingredient_id] = (total + ri.quantity * weekly_covers, u)
+
             seen = {}
             for link in quoted:
                 ing = ingredients_map[link.ingredient_id]
@@ -474,12 +494,20 @@ if ps["step5_done"]:
                     dist = distributors_map[link.distributor_id]
                     seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit, link.ingredient_id)
             best_rows = []
+            total_weekly_cost = 0.0
             for ing_name, (dist_name, price, unit, ing_id) in seen.items():
                 bls = bls_map.get(ing_id)
+                weekly_qty, qty_unit = weekly_qty_map.get(ing_id, (None, unit or "unit"))
+                weekly_cost = price * weekly_qty if weekly_qty else None
+                if weekly_cost:
+                    total_weekly_cost += weekly_cost
+
                 row = {
                     "Ingredient": ing_name,
                     "Best Distributor": dist_name,
-                    "Quoted Price": f"${price:.2f}/{unit or 'unit'}",
+                    "Unit Price": f"${price:.2f}/{unit or 'unit'}",
+                    "Weekly Qty": f"{weekly_qty:.0f} {qty_unit}" if weekly_qty else "N/A",
+                    "Weekly Cost": f"${weekly_cost:.2f}" if weekly_cost else "N/A",
                     "BLS Avg (Retail)": "N/A",
                     "vs Market": "",
                 }
@@ -494,6 +522,8 @@ if ps["step5_done"]:
                         row["vs Market"] = "~ retail"
                 best_rows.append(row)
             st.dataframe(best_rows, use_container_width=True)
+            if total_weekly_cost > 0:
+                st.metric("Estimated Weekly Total", f"${total_weekly_cost:.2f}")
 
             # Items not supplied
             not_supplied = session.query(DistributorIngredient).filter_by(

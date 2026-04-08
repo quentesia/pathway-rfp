@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
-from app.models import Distributor, Ingredient, DistributorIngredient
+from app.models import Distributor, Ingredient, DistributorIngredient, Restaurant
 from app.services.email_sender import get_gmail_service, send_email, _make_yopmail
 
 MODEL = "claude-sonnet-4-20250514"
@@ -133,13 +133,19 @@ def collect_quotes(
     5. If some missing → follow-up reply, mark needs_clarification
     """
     service = get_gmail_service()
+    restaurant = session.get(Restaurant, restaurant_id)
 
     if mock_replies is not None:
         print("Using mock replies for testing...")
         replies = mock_replies
     else:
-        print("Checking inbox for RFP replies...")
-        replies = get_reply_messages(service)
+        after_date = None
+        if restaurant and restaurant.last_inbox_check:
+            after_date = restaurant.last_inbox_check.strftime("%Y/%m/%d")
+            print(f"Checking inbox for RFP replies after {after_date}...")
+        else:
+            print("Checking inbox for RFP replies (first run)...")
+        replies = get_reply_messages(service, after_date=after_date)
 
     if not replies:
         print("  No replies found yet.")
@@ -228,6 +234,8 @@ def collect_quotes(
             body = _compose_followup(distributor.name, needs_clarification)
             send_email(service, sender, to_email, subject, body)
 
+    if restaurant:
+        restaurant.last_inbox_check = datetime.now(timezone.utc)
     session.commit()
     print(f"Step 5 complete: {len(updated_links)} ingredient prices updated.")
     return updated_links

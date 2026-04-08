@@ -383,7 +383,7 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
         print(f"  AI email fallback failed: {e}")
 
 
-def find_local_distributors(session: Session, location: str) -> list[Distributor]:
+def find_local_distributors(session: Session, location: str, restaurant_id: int = None) -> list[Distributor]:
     """
     Full Step 3 pipeline:
     1. Gather all ingredient categories from DB
@@ -391,7 +391,10 @@ def find_local_distributors(session: Session, location: str) -> list[Distributor
     3. Store and link to ingredients
     4. AI fallback for missing emails
     """
-    ingredients = session.query(Ingredient).all()
+    if restaurant_id:
+        ingredients = session.query(Ingredient).filter_by(restaurant_id=restaurant_id).all()
+    else:
+        ingredients = session.query(Ingredient).all()
     if not ingredients:
         print("No ingredients found. Run Step 1 first.")
         return []

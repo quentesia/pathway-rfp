@@ -306,9 +306,18 @@ def _fetch_bls_prices(series_ids: list[str], start_year: int, end_year: int) -> 
             "startyear": str(start_year),
             "endyear": str(end_year),
         }
-        resp = requests.post(BLS_API_URL, json=payload, timeout=30)
-        resp.raise_for_status()
-        result = resp.json()
+        result = None
+        for attempt in range(3):
+            try:
+                resp = requests.post(BLS_API_URL, json=payload, timeout=60)
+                resp.raise_for_status()
+                result = resp.json()
+                break
+            except requests.exceptions.Timeout:
+                print(f"  BLS API timeout (attempt {attempt + 1}/3), retrying...")
+        if not result:
+            print(f"  BLS API failed after 3 attempts, skipping batch")
+            continue
 
         if result.get("status") != "REQUEST_SUCCEEDED":
             print(f"  BLS API warning: {result.get('message', 'unknown error')}")
@@ -421,14 +430,17 @@ def _keyword_match(ingredient_name: str) -> tuple | None:
     return None
 
 
-def fetch_market_trends(session: Session) -> list[USDAPrice]:
+def fetch_market_trends(session: Session, restaurant_id: int = None) -> list[USDAPrice]:
     """
     Full Step 2 pipeline:
     1. Check bls_cache table for this month's data (persists across pipeline resets)
     2. If cache miss, make ONE batch BLS API call and store in cache
     3. Match ingredients to cached series and write USDAPrice records
     """
-    ingredients = session.query(Ingredient).all()
+    if restaurant_id:
+        ingredients = session.query(Ingredient).filter_by(restaurant_id=restaurant_id).all()
+    else:
+        ingredients = session.query(Ingredient).all()
     if not ingredients:
         print("No ingredients found. Run Step 1 first.")
         return []

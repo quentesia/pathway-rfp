@@ -2,7 +2,8 @@
 
 from datetime import date
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, Text, Date, ForeignKey, DateTime
+    Column, Integer, String, Float, Boolean, Text, Date, ForeignKey, DateTime,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from app.db import Base
@@ -22,6 +23,7 @@ class Restaurant(Base):
     location = Column(String)
     menu_source_url = Column(String)
     menu_hash = Column(String, index=True)
+    last_inbox_check = Column(DateTime)
     created_at = Column(Date, default=_today)
 
     recipes = relationship("Recipe", back_populates="restaurant")
@@ -44,14 +46,20 @@ class Recipe(Base):
 
 class Ingredient(Base):
     __tablename__ = "ingredients"
+    __table_args__ = (
+        UniqueConstraint("name", "restaurant_id", name="uq_ingredient_per_restaurant"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=False, unique=True)
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
+    name = Column(String, nullable=False)
     category = Column(String)
     base_unit = Column(String)
     perishable = Column(Boolean, default=True)
     usda_id = Column(String)  # BLS series ID matched by Claude
     created_at = Column(Date, default=_today)
+
+    restaurant = relationship("Restaurant")
 
     recipe_ingredients = relationship("RecipeIngredient", back_populates="ingredient")
     usda_prices = relationship("USDAPrice", back_populates="ingredient")
