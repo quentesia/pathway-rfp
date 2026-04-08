@@ -1,5 +1,6 @@
 """SQLAlchemy ORM models for the RFP pipeline."""
 
+import json
 from datetime import date
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, Text, Date, ForeignKey, DateTime,
@@ -38,6 +39,7 @@ class Recipe(Base):
     dish_description = Column(Text)
     category = Column(String)
     estimated_servings = Column(Integer)
+    popularity_multiplier = Column(Float, default=1.0)
     created_at = Column(Date, default=_today)
 
     restaurant = relationship("Restaurant", back_populates="recipes")
@@ -100,13 +102,33 @@ class USDAPrice(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
     usda_item_name = Column(String)
+    bls_series_id = Column(String)
     price = Column(Float)
     unit = Column(String)
     date = Column(Date)
+    trend_direction = Column(String)  # up, down, flat, unknown
+    trend_abs_change = Column(Float)
+    trend_pct_change = Column(Float)
+    trend_months = Column(Integer)
+    trend_summary = Column(String)
+    trend_tags = Column(String)  # JSON list of tags
     source = Column(String, default="BLS Average Price Data")
     created_at = Column(Date, default=_today)
 
     ingredient = relationship("Ingredient", back_populates="usda_prices")
+
+    @property
+    def trend_tags_list(self) -> list[str]:
+        """Return trend_tags as a Python list."""
+        if not self.trend_tags:
+            return []
+        try:
+            parsed = json.loads(self.trend_tags)
+            if isinstance(parsed, list):
+                return [str(t) for t in parsed]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return [t.strip() for t in self.trend_tags.split(",") if t.strip()]
 
 
 # ── Step 3: Distributor Finding ──────────────────────────────────────────────
@@ -129,6 +151,17 @@ class Distributor(Base):
     rfp_sent_at = Column(DateTime)
 
     ingredient_links = relationship("DistributorIngredient", back_populates="distributor")
+
+    @property
+    def categories_served_list(self) -> list[str]:
+        """Return categories_served as a Python list."""
+        if not self.categories_served:
+            return []
+        try:
+            return json.loads(self.categories_served)
+        except (json.JSONDecodeError, TypeError):
+            # Backward compat: handle old comma-separated format
+            return [c.strip() for c in self.categories_served.split(",") if c.strip()]
 
 
 class DistributorIngredient(Base):

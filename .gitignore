@@ -1,9 +1,11 @@
 __pycache__/
 *.pyc
 .env
+.codex
 token.json
 credentials.json
 rfp_pipeline.db
 .venv/
 *.egg-info/
 rules.pdf
+.talking_points.txt

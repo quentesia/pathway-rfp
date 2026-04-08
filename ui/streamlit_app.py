@@ -18,6 +18,11 @@ from app.services.usda_client import fetch_market_trends
 from app.services.distributor_finder import find_local_distributors
 from app.services.email_sender import send_rfp_emails
 from app.services.inbox_monitor import collect_quotes
+from app.utils import (
+    aggregate_quantities,
+    estimate_category_weekly_covers,
+    load_category_cover_overrides_from_env,
+)
 
 load_dotenv()
 init_db()
@@ -64,7 +69,27 @@ def _check_existing_data(restaurant_id: int) -> dict:
     finally:
         session.close()
 
+
+def _get_claude_category_covers(restaurant_id: int, baseline_weekly_covers: int) -> dict[str, int]:
+    """Estimate category covers from Claude popularity + optional env overrides."""
+    session = SessionLocal()
+    try:
+        recipes = session.query(Recipe).filter(
+            Recipe.restaurant_id == restaurant_id
+        ).all()
+        env_overrides = load_category_cover_overrides_from_env()
+        return estimate_category_weekly_covers(
+            recipes,
+            baseline_weekly_covers,
+            env_overrides=env_overrides,
+        )
+    finally:
+        session.close()
+
 # ── Sidebar: Configuration ───────────────────────────────────────────────────
+
+category_weekly_covers: dict[str, int] = {}
+sidebar_restaurant_id = st.session_state.get("pipeline_state", {}).get("restaurant_id")
 
 with st.sidebar:
     st.header("Configuration")
@@ -76,6 +101,23 @@ with st.sidebar:
         min_value=1, max_value=500, value=40,
         help="How many times each dish is ordered per week. Used to estimate procurement quantities.",
     )
+    if sidebar_restaurant_id:
+        category_defaults = _get_claude_category_covers(sidebar_restaurant_id, int(weekly_covers))
+        if category_defaults:
+            with st.expander("Weekly Covers by Category", expanded=False):
+                st.caption(
+                    "Auto-filled from Claude dish popularity; edit before sending if needed. "
+                    "Optional env override: RFP_WEEKLY_COVERS_BY_CATEGORY (JSON)."
+                )
+                for cat, default_val in category_defaults.items():
+                    category_weekly_covers[cat] = int(st.number_input(
+                        cat,
+                        min_value=0,
+                        max_value=2000,
+                        value=default_val,
+                        step=1,
+                        key=f"weekly_covers_cat_{sidebar_restaurant_id}_{cat}",
+                    ))
 
 # ── Session state ────────────────────────────────────────────────────────────
 
@@ -222,22 +264,43 @@ if ps["step2_done"]:
     session = SessionLocal()
     try:
         records = session.query(USDAPrice).all()
+        all_tags = sorted({tag for r in records for tag in r.trend_tags_list})
+        selected_tags = st.multiselect(
+            "Filter Trend Tags",
+            all_tags,
+            key="step2_trend_tags_filter",
+            help="Filter Step 2 rows by structured trend tags.",
+        )
+        tag_search = st.text_input(
+            "Search Trend Tags",
+            value="",
+            key="step2_trend_tags_search",
+            help="Case-insensitive contains search over trend tags.",
+        ).strip().lower()
+
         ing_ids = {r.ingredient_id for r in records}
         ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
             Ingredient.id.in_(ing_ids)
         ).all()}
         rows = []
         for r in records:
+            tags = r.trend_tags_list
+            if selected_tags and not all(t in tags for t in selected_tags):
+                continue
+            if tag_search and not any(tag_search in t.lower() for t in tags):
+                continue
             ing = ingredients_map[r.ingredient_id]
-            source_parts = r.source.split(" | ")
-            trend_info = source_parts[-1] if len(source_parts) > 1 else ""
             rows.append({
                 "Ingredient": ing.name,
                 "BLS Match": r.usda_item_name,
+                "BLS Series": r.bls_series_id or "N/A",
                 "Price": f"${r.price:.2f}" if r.price else "N/A",
                 "Unit": r.unit or "N/A",
                 "Period": r.date.strftime("%B %Y") if r.date else "N/A",
-                "Trend": trend_info,
+                "Trend": r.trend_summary or "N/A",
+                "Trend Direction": r.trend_direction or "N/A",
+                "Trend %": f"{r.trend_pct_change:+.1f}%" if r.trend_pct_change is not None else "N/A",
+                "Trend Tags": ", ".join(tags) if tags else "N/A",
             })
         if rows:
             st.dataframe(rows, use_container_width=True)
@@ -362,6 +425,7 @@ if _s4_run:
         processed = send_rfp_emails(
             session, ps["restaurant_id"], mock_recipient="demo",
             weekly_covers=weekly_covers,
+            weekly_covers_by_category=category_weekly_covers or None,
             on_status=lambda msg: status.write(msg),
         )
         ps["step4_done"] = True
@@ -404,12 +468,15 @@ if ps["step4_done"]:
             Recipe.restaurant_id == ps["restaurant_id"],
             RecipeIngredient.ingredient_id.in_(link_ing_ids),
         ).all() if link_ing_ids else []
-        qty_map = {}
-        for ri in all_recipe_ings:
-            if ri.ingredient_id not in qty_map:
-                qty_map[ri.ingredient_id] = (0.0, ri.unit)
-            total, u = qty_map[ri.ingredient_id]
-            qty_map[ri.ingredient_id] = (total + ri.quantity * weekly_covers, u)
+        ri_recipe_ids = {ri.recipe_id for ri in all_recipe_ings}
+        recipes_map = {r.id: r for r in session.query(Recipe).filter(Recipe.id.in_(ri_recipe_ids)).all()} if ri_recipe_ids else {}
+        qty_map = aggregate_quantities(
+            all_recipe_ings,
+            weekly_covers,
+            ingredients_map,
+            recipes_map,
+            weekly_covers_by_category=category_weekly_covers or None,
+        )
 
         for dist in distributors:
             status_icon = {"sent": "📨", "completed": "✅", "needs_clarification": "⚠️",
@@ -556,6 +623,7 @@ if ps["step5_done"]:
 
             # ── Best Prices (primary table) ──
             st.subheader("Best Prices — Weekly Order Estimate")
+            st.caption("Market reference uses a wholesale proxy: 50% of BLS retail average.")
 
             # Aggregate weekly quantities
             weekly_qty_map = {}
@@ -564,11 +632,17 @@ if ps["step5_done"]:
                     Recipe.restaurant_id == ps["restaurant_id"],
                     RecipeIngredient.ingredient_id.in_(list(ing_ids)),
                 ).all()
-                for ri in recipe_ings:
-                    if ri.ingredient_id not in weekly_qty_map:
-                        weekly_qty_map[ri.ingredient_id] = (0.0, ri.unit)
-                    total, u = weekly_qty_map[ri.ingredient_id]
-                    weekly_qty_map[ri.ingredient_id] = (total + ri.quantity * weekly_covers, u)
+                recipe_ids = {ri.recipe_id for ri in recipe_ings}
+                recipes_map = {r.id: r for r in session.query(Recipe).filter(
+                    Recipe.id.in_(recipe_ids)
+                ).all()} if recipe_ids else {}
+                weekly_qty_map = aggregate_quantities(
+                    recipe_ings,
+                    weekly_covers,
+                    ingredients_map,
+                    recipes_map,
+                    weekly_covers_by_category=category_weekly_covers or None,
+                )
 
             seen = {}
             for link in quoted:
@@ -591,18 +665,19 @@ if ps["step5_done"]:
                     "Unit Price": f"${price:.2f}/{unit or 'unit'}",
                     "Weekly Qty": f"{weekly_qty:.0f} {qty_unit}" if weekly_qty else "N/A",
                     "Weekly Cost": f"${weekly_cost:.2f}" if weekly_cost else "N/A",
-                    "BLS Avg": "N/A",
+                    "Wholesale Ref (50% BLS)": "N/A",
                     "vs Market": "",
                 }
                 if bls and bls.price:
-                    row["BLS Avg"] = f"${bls.price:.2f}/{bls.unit or 'unit'}"
-                    diff_pct = ((price - bls.price) / bls.price) * 100
+                    wholesale_ref = bls.price * 0.5
+                    row["Wholesale Ref (50% BLS)"] = f"${wholesale_ref:.2f}/{bls.unit or 'unit'}"
+                    diff_pct = ((price - wholesale_ref) / wholesale_ref) * 100 if wholesale_ref else 0.0
                     if diff_pct > 20:
                         row["vs Market"] = f"+{diff_pct:.0f}%"
                     elif diff_pct < -10:
                         row["vs Market"] = f"{diff_pct:.0f}%"
                     else:
-                        row["vs Market"] = "~ retail"
+                        row["vs Market"] = "~ near wholesale ref"
                 best_rows.append(row)
             st.dataframe(best_rows, use_container_width=True)
 
@@ -620,14 +695,15 @@ if ps["step5_done"]:
                     bls = bls_map.get(link.ingredient_id)
 
                     if bls and bls.price and link.quoted_price:
-                        bls_str = f"${bls.price:.2f}/{bls.unit or 'unit'}"
-                        diff_pct = ((link.quoted_price - bls.price) / bls.price) * 100
+                        wholesale_ref = bls.price * 0.5
+                        bls_str = f"${wholesale_ref:.2f}/{bls.unit or 'unit'}"
+                        diff_pct = ((link.quoted_price - wholesale_ref) / wholesale_ref) * 100 if wholesale_ref else 0.0
                         if diff_pct > 20:
-                            flag = f"+{diff_pct:.0f}% above retail"
+                            flag = f"+{diff_pct:.0f}% above wholesale ref"
                         elif diff_pct < -10:
-                            flag = f"{diff_pct:.0f}% below retail"
+                            flag = f"{diff_pct:.0f}% below wholesale ref"
                         else:
-                            flag = "~ near retail"
+                            flag = "~ near wholesale ref"
                     else:
                         bls_str = "N/A"
                         flag = ""
@@ -637,7 +713,7 @@ if ps["step5_done"]:
                         "Ingredient": ing.name,
                         "Quoted Price": f"${link.quoted_price:.2f}",
                         "Unit": link.quoted_unit or "N/A",
-                        "BLS Avg": bls_str,
+                        "Wholesale Ref (50% BLS)": bls_str,
                         "vs Market": flag,
                         "Delivery": link.delivery_terms or "N/A",
                     })

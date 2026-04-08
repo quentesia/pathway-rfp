@@ -346,9 +346,6 @@ def _match_ingredients_with_claude(ingredient_names: list[str]) -> dict[str, tup
     Sends one batch request with all ingredients and all BLS items.
     Returns {ingredient_name: (series_id, description, unit) or None}.
     """
-    import os
-    import anthropic
-
     # Build the BLS items list for the prompt (deduplicated by series_id)
     seen = set()
     bls_items_text = []
@@ -363,31 +360,25 @@ def _match_ingredients_with_claude(ingredient_names: list[str]) -> dict[str, tup
     ingredients_list = "\n".join(f"- {name}" for name in ingredient_names)
 
     from app.services.prompts import get_bls_match_prompt
+    from app.services.llm_client import generate_json_text
     prompt = get_bls_match_prompt(bls_list, ingredients_list, _BLS_SCHEMA_JSON)
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("  ANTHROPIC_API_KEY not set — falling back to keyword matching")
-        return {name: _keyword_match(name) for name in ingredient_names}
-
-    client = anthropic.Anthropic(api_key=api_key)
-    print("  Asking Claude to match ingredients to BLS series...")
-
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    print("  Asking LLM to match ingredients to BLS series (Anthropic with OpenAI backup)...")
 
     # Parse the JSON response with Pydantic
     from app.utils import strip_json_fences
-    response_text = strip_json_fences(response.content[0].text)
+    try:
+        response_text = strip_json_fences(generate_json_text(prompt, max_tokens=4096))
+    except Exception as e:
+        print(f"  LLM matching failed: {e}")
+        print("  Falling back to keyword matching")
+        return {name: _keyword_match(name) for name in ingredient_names}
 
     try:
         parsed = BLSMatchResult.model_validate_json(response_text)
         matches = {m.ingredient_name: m.series_id for m in parsed.matches}
     except Exception as e:
-        print(f"  Claude response failed validation: {e}")
+        print(f"  LLM response failed validation: {e}")
         print("  Falling back to keyword matching")
         return {name: _keyword_match(name) for name in ingredient_names}
 
@@ -540,27 +531,57 @@ def fetch_market_trends(session: Session, restaurant_id: int = None,
 
         # Build a trend summary from available data points
         trend_prices = [float(dp["value"]) for dp in data_points[:6] if dp.get("value")]
+        trend_months = len(trend_prices)
+        trend_direction = "unknown"
+        trend_abs_change = None
+        trend_pct_change = None
+        trend_summary = "insufficient data for trend"
+        trend_tags = ["trend:unknown", "window:insufficient"]
         if len(trend_prices) >= 2:
             change = trend_prices[0] - trend_prices[-1]
-            direction = "↑" if change > 0 else "↓" if change < 0 else "→"
-            trend_note = f"{direction} ${abs(change):.2f} over {len(trend_prices)} months"
-        else:
-            trend_note = "insufficient data for trend"
+            trend_abs_change = round(change, 4)
+            if trend_prices[-1] != 0:
+                trend_pct_change = round((change / trend_prices[-1]) * 100.0, 2)
+            if change > 0:
+                trend_direction = "up"
+                trend_icon = "↑"
+            elif change < 0:
+                trend_direction = "down"
+                trend_icon = "↓"
+            else:
+                trend_direction = "flat"
+                trend_icon = "→"
+
+            trend_summary = f"{trend_icon} ${abs(change):.2f} over {len(trend_prices)} months"
+            trend_tags = [f"trend:{trend_direction}", f"window:{len(trend_prices)}m"]
+            if trend_pct_change is not None:
+                if trend_pct_change >= 10:
+                    trend_tags.append("volatility:high_up")
+                elif trend_pct_change <= -10:
+                    trend_tags.append("volatility:high_down")
+                else:
+                    trend_tags.append("volatility:low")
 
         record = USDAPrice(
             ingredient_id=ing.id,
             usda_item_name=description,
+            bls_series_id=series_id,
             price=price_val,
             unit=unit,
             date=price_date,
-            source=f"BLS Average Price | {series_id} | Trend: {trend_note}",
+            trend_direction=trend_direction,
+            trend_abs_change=trend_abs_change,
+            trend_pct_change=trend_pct_change,
+            trend_months=trend_months,
+            trend_summary=trend_summary,
+            trend_tags=json.dumps(trend_tags),
+            source="BLS Average Price Data",
         )
         session.add(record)
         records.append(record)
-        print(f"  {ing.name} → '{description}' | ${price_val:.2f} {unit} ({date_str}) {trend_note}")
+        print(f"  {ing.name} → '{description}' | ${price_val:.2f} {unit} ({date_str}) {trend_summary}")
 
     session.commit()
     unmatched = len(ingredients) - len(records)
     _status(f"Done — {len(records)} price records stored, {unmatched} ingredients had no BLS match.")
     return records
-

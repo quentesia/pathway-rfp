@@ -5,16 +5,12 @@ import os
 import base64
 from datetime import datetime, timezone
 
-import anthropic
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.models import Distributor, Ingredient, DistributorIngredient, Restaurant
 from app.services.email_sender import get_gmail_service, send_email, _make_yopmail
-
-MODEL = "claude-sonnet-4-20250514"
-
 
 def get_reply_messages(service, after_date: str = None) -> list[dict]:
     """Fetch replies matching RFP subject lines."""
@@ -72,21 +68,16 @@ class ParsedQuoteList(BaseModel):
 
 
 def parse_quote_from_email(email_body: str, requested_ingredients: list[str]) -> ParsedQuoteList | None:
-    """Use Claude to extract structured quote data from an email reply."""
+    """Use LLM to extract structured quote data from an email reply."""
     from app.services.prompts import get_quote_parse_prompt
+    from app.services.llm_client import generate_json_text
     schema_json = json.dumps(ParsedQuoteList.model_json_schema(), indent=2)
     req_str = "\n".join(f"- {i}" for i in requested_ingredients)
     prompt = get_quote_parse_prompt(email_body, req_str, schema_json)
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
         from app.utils import strip_json_fences
-        text = strip_json_fences(response.content[0].text)
+        text = strip_json_fences(generate_json_text(prompt, max_tokens=2048))
         return ParsedQuoteList.model_validate_json(text)
     except Exception as e:
         print(f"  Error parsing quote: {e}")
@@ -172,11 +163,11 @@ def collect_quotes(
                     distributor = dist
                     break
         else:
-            for dist in session.query(Distributor).all():
-                if dist.email and dist.email.lower() in reply["from"].lower():
-                    distributor = dist
-                    break
-                if dist.name.lower() in reply["from"].lower():
+            for dist in session.query(Distributor).filter(
+                Distributor.rfp_status.in_(("sent", "needs_clarification")),
+                Distributor.email.isnot(None),
+            ).all():
+                if dist.email.lower() in reply["from"].lower():
                     distributor = dist
                     break
 

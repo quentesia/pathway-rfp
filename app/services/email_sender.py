@@ -193,8 +193,7 @@ def _fill_form_by_patterns(form, sender_email: str, rfp_body: str) -> dict[str, 
 
 
 def _fill_form_with_claude(form_html: str, sender_email: str, rfp_body: str) -> dict[str, str]:
-    """Ask Claude to map form fields to our data, returning {field_name: value}."""
-    import anthropic
+    """Ask LLM to map form fields to our data, returning {field_name: value}."""
 
     data = {
         "email": sender_email,
@@ -229,15 +228,10 @@ Reply with ONLY a JSON object mapping the EXACT field "name" attributes to eithe
 Map ALL fillable fields, using empty string for fields you can't match."""
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        from app.services.llm_client import generate_json_text
         import json
         from app.utils import strip_json_fences
-        raw = strip_json_fences(response.content[0].text)
+        raw = strip_json_fences(generate_json_text(prompt, max_tokens=1024))
         mappings = json.loads(raw)
 
         # Substitute "message" placeholder with actual body
@@ -249,7 +243,7 @@ Map ALL fillable fields, using empty string for fields you can't match."""
                 result[field_name] = value
         return result
     except Exception as e:
-        print(f"    Claude form analysis failed: {e}")
+        print(f"    LLM form analysis failed: {e}")
         return {}
 
 
@@ -371,11 +365,13 @@ def _make_yopmail(distributor_name: str) -> str:
 def _get_ingredients_for_distributor(
     session: Session, dist: Distributor, restaurant_id: int,
     weekly_covers: int = 40,
+    weekly_covers_by_category: dict[str, int] | None = None,
 ) -> list[tuple]:
     """Get linked ingredients with USDA reference data and aggregated quantities.
 
     Returns list of (Ingredient, usda_match_name, unit, total_qty, qty_unit).
-    Quantities are per-serving × weekly_covers, summed across all recipes.
+    Quantities are per-serving × weekly_covers, summed across all recipes,
+    with optional category-level weekly cover overrides.
     """
     links = session.query(DistributorIngredient).filter_by(
         distributor_id=dist.id
@@ -388,17 +384,21 @@ def _get_ingredients_for_distributor(
         Ingredient.id.in_(ing_ids)
     ).all()}
 
-    # Aggregate quantities: per-serving qty × weekly_covers, summed across recipes
+    # Aggregate quantities: per-serving qty × weekly_covers × popularity, normalized to base_unit
+    from app.utils import aggregate_quantities
     recipe_ings = session.query(RecipeIngredient).join(Recipe).filter(
         Recipe.restaurant_id == restaurant_id,
         RecipeIngredient.ingredient_id.in_(ing_ids),
     ).all()
-    qty_map = {}
-    for ri in recipe_ings:
-        if ri.ingredient_id not in qty_map:
-            qty_map[ri.ingredient_id] = (0.0, ri.unit)
-        total, unit = qty_map[ri.ingredient_id]
-        qty_map[ri.ingredient_id] = (total + ri.quantity * weekly_covers, unit)
+    recipe_ids = {ri.recipe_id for ri in recipe_ings}
+    recipes_map = {r.id: r for r in session.query(Recipe).filter(Recipe.id.in_(recipe_ids)).all()}
+    qty_map = aggregate_quantities(
+        recipe_ings,
+        weekly_covers,
+        ingredients,
+        recipes_map,
+        weekly_covers_by_category=weekly_covers_by_category,
+    )
 
     usda_map = {u.ingredient_id: u for u in session.query(USDAPrice).filter(
         USDAPrice.ingredient_id.in_(ing_ids)
@@ -422,6 +422,7 @@ def send_rfp_emails(
     mock_recipient: str | None = None,
     submit_forms: bool = False,
     weekly_covers: int = 40,
+    weekly_covers_by_category: dict[str, int] | None = None,
     on_status: callable = None,
 ) -> list[Distributor]:
     """
@@ -444,9 +445,15 @@ def send_rfp_emails(
         _status(f"Restaurant {restaurant_id} not found.")
         return []
 
-    distributors = session.query(Distributor).all()
-    if not distributors:
+    distributors = session.query(Distributor).filter_by(rfp_status="pending").all()
+    total_count = session.query(Distributor).count()
+    already_sent = total_count - len(distributors)
+
+    if total_count == 0:
         _status("No distributors found. Run Step 3 first.")
+        return []
+    if not distributors:
+        _status(f"All {total_count} distributors already contacted. No pending sends.")
         return []
 
     sender = os.getenv("GMAIL_SENDER", "")
@@ -454,7 +461,10 @@ def send_rfp_emails(
         _status("GMAIL_SENDER not set. Set it in .env")
         return []
 
-    _status(f"Preparing RFPs for {len(distributors)} distributors...")
+    if already_sent > 0:
+        _status(f"Skipping {already_sent} already-contacted distributors. Preparing RFPs for {len(distributors)} remaining...")
+    else:
+        _status(f"Preparing RFPs for {len(distributors)} distributors...")
     service = get_gmail_service()
     processed = []
     sent_count = 0
@@ -462,7 +472,13 @@ def send_rfp_emails(
     skipped_count = 0
 
     for i, dist in enumerate(distributors, 1):
-        ingredients_with_info = _get_ingredients_for_distributor(session, dist, restaurant_id, weekly_covers)
+        ingredients_with_info = _get_ingredients_for_distributor(
+            session,
+            dist,
+            restaurant_id,
+            weekly_covers,
+            weekly_covers_by_category=weekly_covers_by_category,
+        )
         if not ingredients_with_info:
             continue
 

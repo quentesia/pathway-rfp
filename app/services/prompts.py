@@ -18,6 +18,10 @@ CRITICAL RULES:
 - It should always be items attainable from a food distributor. Else, break it down into items that can be attained from a food distributor.
   e.g. If the menu says "Mixed Cheeses", break it down into cheeses that typicall go into the meal. 
 - Infer realistic restaurant-scale quantities per serving.
+- Estimate a "popularity_multiplier" for each dish: how many times more (or fewer)
+  orders this dish gets compared to the average dish. Use 1.0 as the baseline average.
+  A popular staple like a burger or pasta might be 2.0–3.0. A niche/expensive item
+  like a lobster special might be 0.2–0.5. A mid-range entrée stays near 1.0.
 - Include everything a kitchen would need: proteins, produce, seasonings,
   oils, garnishes, sauces.
 - Units MUST be one of: each, pinch, tsp, tbsp, cup, pt, qt, gal, ml, l, g, kg, oz, lb

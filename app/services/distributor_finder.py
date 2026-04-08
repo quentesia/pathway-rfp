@@ -6,7 +6,6 @@ import re
 
 from urllib.parse import urljoin
 
-import anthropic
 import httpx
 import requests
 from bs4 import BeautifulSoup
@@ -14,12 +13,6 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.models import Ingredient, Distributor, DistributorIngredient
-
-MODEL = "claude-sonnet-4-20250514"
-
-
-
-
 
 # ── Serper (google.serper.dev) ────────────────────────────────────────────────
 
@@ -82,24 +75,19 @@ def search_llm_fallback(location: str, categories: list[str]) -> list[dict]:
     )
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        from app.services.llm_client import generate_json_text
         from app.utils import strip_json_fences
-        text = strip_json_fences(response.content[0].text)
+        text = strip_json_fences(generate_json_text(prompt, max_tokens=2048))
         parsed = DistributorList.model_validate_json(text)
         distributors = []
         for d in parsed.distributors:
             d_dict = d.model_dump()
-            d_dict["source"] = "Claude LLM inference"
+            d_dict["source"] = "LLM inference (Anthropic/OpenAI)"
             distributors.append(d_dict)
             
         return distributors
     except Exception as e:
-        print(f"  Claude distributor search failed: {e}")
+        print(f"  LLM distributor search failed: {e}")
         return []
 
 
@@ -296,7 +284,7 @@ def store_distributors(
                 rating=d.get("rating"),
                 rating_count=d.get("rating_count"),
                 source=d.get("source", "Unknown"),
-                categories_served=", ".join(d.get("categories_served", [])),
+                categories_served=json.dumps(d.get("categories_served", [])),
             )
             session.add(dist)
             session.flush()
@@ -348,7 +336,7 @@ class EmailLookupResult(BaseModel):
 
 
 def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> None:
-    """Use Claude to infer emails for distributors that have a website but no email."""
+    """Use LLM to infer emails for distributors that have a website but no email."""
     missing = [d for d in distributors if d.website and not d.email]
     if not missing:
         return
@@ -368,14 +356,9 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
     )
 
     try:
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        from app.services.llm_client import generate_json_text
         from app.utils import strip_json_fences
-        text = strip_json_fences(response.content[0].text)
+        text = strip_json_fences(generate_json_text(prompt, max_tokens=1024))
         parsed = EmailLookupResult.model_validate_json(text)
 
         for dist, result in zip(missing, parsed.results):

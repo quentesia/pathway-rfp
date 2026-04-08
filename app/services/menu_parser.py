@@ -9,13 +9,10 @@ import os
 import base64
 import hashlib
 
-import anthropic
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.models import Restaurant, Recipe, Ingredient, RecipeIngredient
-
-MODEL = "claude-sonnet-4-20250514"
 
 VALID_UNITS = {"each", "pinch", "tsp", "tbsp", "cup", "pt", "qt", "gal", "ml", "l", "g", "kg", "oz", "lb"}
 VALID_CATEGORIES = {
@@ -56,6 +53,7 @@ class RecipeEntry(BaseModel):
     price: str | None = None
     category: str = "Other"
     estimated_servings: int = 1
+    popularity_multiplier: float = 1.0
     ingredients: list[IngredientEntry]
 
 
@@ -67,7 +65,7 @@ class MenuParseResult(BaseModel):
 _SCHEMA_JSON = json.dumps(MenuParseResult.model_json_schema(), indent=2)
 
 
-# ── Claude call ──────────────────────────────────────────────────────────────
+# ── LLM call (Anthropic primary, OpenAI fallback) ───────────────────────────
 
 def parse_menu_image(image_path: str) -> MenuParseResult:
     """Send menu photo to Claude, get back validated recipes."""
@@ -87,32 +85,19 @@ def parse_menu_image(image_path: str) -> MenuParseResult:
 
     image_data = base64.standard_b64encode(file_bytes).decode("utf-8")
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     from app.services.prompts import get_menu_parse_prompt
+    from app.services.llm_client import generate_json_with_image
     
-    response = client.messages.create(
-        model=MODEL,
+    raw_text = generate_json_with_image(
+        system_prompt=get_menu_parse_prompt(_SCHEMA_JSON),
+        user_text="Parse this entire restaurant menu. Return every dish with full recipes.",
+        image_data_b64=image_data,
+        media_type=media_type,
         max_tokens=16384,
-        temperature=0,
-        system=get_menu_parse_prompt(_SCHEMA_JSON),
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_data}},
-                {"type": "text", "text": "Parse this entire restaurant menu. Return every dish with full recipes."},
-            ],
-        }],
     )
 
-    if response.stop_reason == "max_tokens":
-        raise RuntimeError(
-            f"Claude response truncated (hit max_tokens). "
-            f"Got {len(response.content[0].text)} chars. Increase max_tokens."
-        )
-
     from app.utils import strip_json_fences
-    raw = strip_json_fences(response.content[0].text)
+    raw = strip_json_fences(raw_text)
 
     data = json.loads(raw)
     return MenuParseResult.model_validate(data)
@@ -135,6 +120,7 @@ def store_parsed_recipes(
             dish_description=entry.description,
             category=entry.category,
             estimated_servings=entry.estimated_servings,
+            popularity_multiplier=entry.popularity_multiplier,
         )
         session.add(recipe)
         session.flush()
@@ -208,7 +194,7 @@ def parse_menu(session: Session, restaurant_name: str,
     session.flush()
     _status(f"Created restaurant: {restaurant.name} (id={restaurant.id})")
 
-    _status("Sending menu photo to Claude for parsing (this may take 1-2 min)...")
+    _status("Sending menu photo to LLM for parsing (Anthropic with OpenAI backup)...")
     result = parse_menu_image(menu_image_path)
 
     all_ing_names = {ing.name for r in result.recipes for ing in r.ingredients}
