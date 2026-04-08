@@ -60,19 +60,11 @@ Return ONLY the JSON. No markdown fences, no commentary."""
 DISTRIBUTOR_PROMPT = """You are a restaurant supply chain expert. Given a city/region and a list
 of ingredient categories, identify real, well-known food distributors that operate in that area.
 
-Return ONLY valid JSON matching this structure:
-{{
-    "distributors": [
-        {{
-            "name": "string (real company name)",
-            "location": "string (city, state)",
-            "phone": "string or null",
-            "email": "string (use format: sales@companyname.com if unknown)",
-            "website": "string or null",
-            "categories_served": ["Produce", "Meat & Poultry", ...]
-        }}
-    ]
-}}
+Your response MUST be valid JSON conforming to this exact schema:
+
+{schema_json}
+
+Return ONLY the JSON. No markdown fences, no commentary.
 
 Rules:
 - Return 3-6 distributors

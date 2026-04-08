@@ -18,8 +18,8 @@ def init_db():
     from app.models import (  # noqa: F401 — import to register models
         Restaurant, Recipe, Ingredient, RecipeIngredient,
         USDAPrice,
-        # Distributor, DistributorIngredient,
-        # RFPEmail, RFPQuote,
+        Distributor, DistributorIngredient,
+        RFPEmail, RFPQuote,
     )
     Base.metadata.create_all(ENGINE)
 

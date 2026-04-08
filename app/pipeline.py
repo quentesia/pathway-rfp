@@ -3,8 +3,8 @@
 from dotenv import load_dotenv
 from app.db import init_db, SessionLocal
 from app.services.menu_parser import parse_menu
-from app.services.usda_client import run_step2
-# from app.services.distributor_finder import find_local_distributors
+from app.services.usda_client import fetch_market_trends
+from app.services.distributor_finder import find_local_distributors
 # from app.services.email_sender import send_rfp_emails
 # from app.services.inbox_monitor import collect_quotes
 
@@ -14,6 +14,7 @@ def run_pipeline(
     restaurant_name: str,
     restaurant_location: str = "",
     menu_url: str = "",
+    skip_step2: bool = False,
 ) -> dict:
     """
     Run the full RFP pipeline.
@@ -48,36 +49,43 @@ def run_pipeline(
         results["recipes"] = recipes
 
         # Step 2: Market Price Trends
-        print("\n" + "=" * 60)
-        print("STEP 2: Fetching Market Price Trends (BLS)")
-        print("=" * 60)
-        try:
-            prices = run_step2(session)
-            results["prices"] = prices
-        except Exception as e:
-            print(f"  Skipping Step 2: {e}")
+        if skip_step2:
+            print("\n" + "=" * 60)
+            print("STEP 2: Fetching Market Price Trends (BLS) [SKIPPED]")
+            print("=" * 60)
             results["prices"] = []
+        else:
+            print("\n" + "=" * 60)
+            print("STEP 2: Fetching Market Price Trends (BLS)")
+            print("=" * 60)
+            try:
+                prices = fetch_market_trends(session)
+                results["prices"] = prices
+            except Exception as e:
+                print(f"  Skipping Step 2: {e}")
+                results["prices"] = []
 
-        # # Step 3: Find Distributors
-        # print("\n" + "=" * 60)
-        # print("STEP 3: Finding Local Distributors")
-        # print("=" * 60)
-        # location = restaurant_location or os.getenv("RESTAURANT_LOCATION", "Atlanta, GA")
-        # distributors = run_step3(session, location)
-        # results["distributors"] = distributors
+        # Step 3: Find Distributors
+        print("\n" + "=" * 60)
+        print("STEP 3: Finding Local Distributors")
+        print("=" * 60)
+        import os
+        location = restaurant_location or os.getenv("RESTAURANT_LOCATION", "Atlanta, GA")
+        distributors = find_local_distributors(session, location)
+        results["distributors"] = distributors
 
         # # Step 4: Send RFP Emails
         # print("\n" + "=" * 60)
         # print("STEP 4: Sending RFP Emails")
         # print("=" * 60)
-        # emails = run_step4(session, restaurant.id, mock_recipient=mock_email)
+        # emails = send_rfp_emails(session, restaurant.id, mock_recipient=mock_email)
         # results["emails"] = emails
 
         # # Step 5: Monitor Inbox (nice-to-have)
         # print("\n" + "=" * 60)
         # print("STEP 5: Monitoring Inbox for Quotes")
         # print("=" * 60)
-        # quotes = run_step5(session, restaurant.id)
+        # quotes = collect_quotes(session, restaurant.id)
         # results["quotes"] = quotes
 
         print("\n" + "=" * 60)
@@ -103,4 +111,5 @@ if __name__ == "__main__":
         restaurant_name=RESTAURANT_NAME,
         restaurant_location=RESTAURANT_LOCATION,
         menu_url=MENU_URL,
+        skip_step2=True,
     )

@@ -2,7 +2,7 @@
 
 from datetime import date
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, Text, Date, ForeignKey,
+    Column, Integer, String, Float, Boolean, Text, Date, ForeignKey, DateTime
 )
 from sqlalchemy.orm import relationship
 from app.db import Base
@@ -22,6 +22,8 @@ class Restaurant(Base):
     location = Column(String)
     menu_source_url = Column(String)
     created_at = Column(Date, default=_today)
+    
+    rfp_emails = relationship("RFPEmail", back_populates="restaurant")
 
     recipes = relationship("Recipe", back_populates="restaurant")
     # rfp_emails = relationship("RFPEmail", back_populates="restaurant")
@@ -55,7 +57,7 @@ class Ingredient(Base):
 
     recipe_ingredients = relationship("RecipeIngredient", back_populates="ingredient")
     usda_prices = relationship("USDAPrice", back_populates="ingredient")
-    # distributor_links = relationship("DistributorIngredient", back_populates="ingredient")
+    distributor_links = relationship("DistributorIngredient", back_populates="ingredient")
 
 
 class RecipeIngredient(Base):
@@ -89,63 +91,64 @@ class USDAPrice(Base):
     ingredient = relationship("Ingredient", back_populates="usda_prices")
 
 
-# ── Distributors (Step 3) ────────────────────────────────────────────────────
+# ── Step 3: Distributor Finding ──────────────────────────────────────────────
 
-# class Distributor(Base):
-#     __tablename__ = "distributors"
-#
-#     id = Column(Integer, primary_key=True, autoincrement=True)
-#     name = Column(String, nullable=False)
-#     location = Column(String)
-#     phone = Column(String)
-#     email = Column(String)
-#     website = Column(String)
-#     source = Column(String)
-#     created_at = Column(Date, default=_today)
-#
-#     ingredient_links = relationship("DistributorIngredient", back_populates="distributor")
-#     rfp_emails = relationship("RFPEmail", back_populates="distributor")
+class Distributor(Base):
+    __tablename__ = "distributors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    location = Column(String)
+    phone = Column(String)
+    email = Column(String)
+    website = Column(String)
+    source = Column(String)  # Google, SerpAPI, Claude
+    categories_served = Column(String)
+
+    ingredient_links = relationship("DistributorIngredient", back_populates="distributor")
+    rfp_emails = relationship("RFPEmail", back_populates="distributor")
 
 
-# class DistributorIngredient(Base):
-#     __tablename__ = "distributor_ingredients"
-#
-#     id = Column(Integer, primary_key=True, autoincrement=True)
-#     distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
-#     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
-#
-#     distributor = relationship("Distributor", back_populates="ingredient_links")
-#     ingredient = relationship("Ingredient", back_populates="distributor_links")
+class DistributorIngredient(Base):
+    __tablename__ = "distributor_ingredients"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
+    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
+
+    distributor = relationship("Distributor", back_populates="ingredient_links")
+    ingredient = relationship("Ingredient", back_populates="distributor_links")
 
 
 # ── RFP (Steps 4-5) ─────────────────────────────────────────────────────────
 
-# class RFPEmail(Base):
-#     __tablename__ = "rfp_emails"
-#
-#     id = Column(Integer, primary_key=True, autoincrement=True)
-#     distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
-#     restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
-#     subject = Column(String, nullable=False)
-#     body = Column(Text, nullable=False)
-#     sent_at = Column(DateTime)
-#     status = Column(String, default="draft")
-#
-#     distributor = relationship("Distributor", back_populates="rfp_emails")
-#     restaurant = relationship("Restaurant", back_populates="rfp_emails")
-#     quotes = relationship("RFPQuote", back_populates="rfp_email")
+class RFPEmail(Base):
+    __tablename__ = "rfp_emails"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
+    restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
+    subject = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    sent_at = Column(DateTime)
+    status = Column(String, default="draft")
+
+    distributor = relationship("Distributor", back_populates="rfp_emails")
+    restaurant = relationship("Restaurant", back_populates="rfp_emails")
+    quotes = relationship("RFPQuote", back_populates="rfp_email")
 
 
-# class RFPQuote(Base):
-#     __tablename__ = "rfp_quotes"
-#
-#     id = Column(Integer, primary_key=True, autoincrement=True)
-#     rfp_email_id = Column(Integer, ForeignKey("rfp_emails.id"), nullable=False)
-#     distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
-#     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
-#     quoted_price = Column(Float)
-#     unit = Column(String)
-#     delivery_terms = Column(Text)
-#     received_at = Column(DateTime)
-#
-#     rfp_email = relationship("RFPEmail", back_populates="quotes")
+class RFPQuote(Base):
+    __tablename__ = "rfp_quotes"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rfp_email_id = Column(Integer, ForeignKey("rfp_emails.id"), nullable=False)
+    distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
+    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
+    quoted_price = Column(Float)
+    unit = Column(String)
+    delivery_terms = Column(String)
+    raw_text = Column(Text)
+
+    rfp_email = relationship("RFPEmail", back_populates="quotes")
+    distributor = relationship("Distributor")
+    ingredient = relationship("Ingredient")
