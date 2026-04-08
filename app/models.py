@@ -103,6 +103,8 @@ class Distributor(Base):
     phone = Column(String)
     email = Column(String)
     website = Column(String)
+    rating = Column(Float)
+    rating_count = Column(Integer)
     source = Column(String)  # Google, SerpAPI, Claude
     categories_served = Column(String)
 

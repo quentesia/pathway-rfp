@@ -170,7 +170,13 @@ if st.button("Find Distributors", disabled=not ps["step1_done"]):
         try:
             distributors = find_local_distributors(session, restaurant_location)
             ps["step3_done"] = True
-            st.success(f"Found {len(distributors)} distributors!")
+            with_email = sum(1 for d in distributors if d.email and not d.email.startswith("form:"))
+            with_form = sum(1 for d in distributors if d.email and d.email.startswith("form:"))
+            parts = [f"Found {len(distributors)} distributors"]
+            parts.append(f"{with_email} with email")
+            if with_form:
+                parts.append(f"{with_form} with contact form")
+            st.success(" — ".join(parts) + "!")
         finally:
             session.close()
 
@@ -178,10 +184,29 @@ if ps["step3_done"]:
     session = SessionLocal()
     try:
         distributors = session.query(Distributor).all()
-        for dist in distributors:
+
+        # Split into contactable vs phone-only
+        contactable = [d for d in distributors if d.email]
+        phone_only = [d for d in distributors if not d.email]
+
+        def _show_distributor(dist):
+            if dist.rating and dist.rating_count:
+                confidence = min(dist.rating_count / 50, 1.0)
+                weighted = dist.rating * confidence
+                rating_str = f"{dist.rating} ({dist.rating_count} reviews) — weighted: {weighted:.1f}/5"
+            elif dist.rating:
+                rating_str = f"{dist.rating} (no review count)"
+            else:
+                rating_str = "N/A"
+
             with st.expander(f"{dist.name} — {dist.location}"):
+                st.write(f"**Rating:** {rating_str}")
                 st.write(f"**Phone:** {dist.phone or 'N/A'}")
-                st.write(f"**Email:** {dist.email or 'N/A'}")
+                if dist.email and dist.email.startswith("form:"):
+                    form_url = dist.email[5:]
+                    st.write(f"**Email:** [Contact Form]({form_url})")
+                else:
+                    st.write(f"**Email:** {dist.email or 'N/A'}")
                 st.write(f"**Website:** {dist.website or 'N/A'}")
                 st.write(f"**Source:** {dist.source}")
 
@@ -194,6 +219,15 @@ if ps["step3_done"]:
                     ing_names.append(ing.name)
                 if ing_names:
                     st.write(f"**Possible Supplies:** {', '.join(ing_names)}")
+
+        for dist in contactable:
+            _show_distributor(dist)
+
+        if phone_only:
+            st.subheader(f"Phone Only ({len(phone_only)})")
+            st.caption("No email or website found — requires a phone call.")
+            for dist in phone_only:
+                _show_distributor(dist)
     finally:
         session.close()
 

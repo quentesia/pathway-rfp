@@ -2,9 +2,14 @@
 
 import json
 import os
+import re
+
+from urllib.parse import urljoin
 
 import anthropic
+import httpx
 import requests
+from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
@@ -42,6 +47,8 @@ def search_serper_api(location: str, query: str, api_key: str, category: str = "
             "phone": r.get("phoneNumber"),
             "email": None,
             "website": r.get("website"),
+            "rating": r.get("rating"),
+            "rating_count": r.get("ratingCount"),
             "source": "Serper Places API",
             "categories_served": [category] if category else [],
         })
@@ -99,6 +106,113 @@ def search_llm_fallback(location: str, categories: list[str]) -> list[dict]:
         return []
 
 
+# ── Email scraping ──────────────────────────────────────────────────────────
+
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+_SKIP_DOMAINS = {
+    "example.com", "sentry.io", "wixpress.com", "googleapis.com",
+    "wordpress.com", "squarespace.com", "w3.org", "schema.org",
+    "googleusercontent.com", "gstatic.com",
+}
+_SKIP_PREFIXES = {"user@", "name@", "email@", "your@", "username@", "test@"}
+
+# Preferred prefixes for RFP outreach, in priority order
+_GOOD_PREFIXES = ["sales@", "orders@", "info@", "contact@", "hello@"]
+
+_HTTP_CLIENT = httpx.Client(
+    timeout=10, follow_redirects=True,
+    headers={"User-Agent": "Mozilla/5.0"},
+)
+
+
+def _extract_best_email(html: str) -> str | None:
+    """Pull the best contact email from HTML, filtering junk."""
+    candidates = []
+    for email in _EMAIL_RE.findall(html):
+        email = email.lower()
+        domain = email.split("@")[1]
+        if domain in _SKIP_DOMAINS:
+            continue
+        if any(email.startswith(p) for p in _SKIP_PREFIXES):
+            continue
+        if email.endswith((".png", ".jpg", ".gif", ".svg", ".css", ".js")):
+            continue
+        candidates.append(email)
+
+    if not candidates:
+        return None
+
+    # Pick by prefix priority
+    for prefix in _GOOD_PREFIXES:
+        for c in candidates:
+            if c.startswith(prefix):
+                return c
+    return candidates[0]
+
+
+def _find_contact_page_url(html: str, base_url: str) -> str | None:
+    """Find a /contact or /contact-us link in the page."""
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower()
+        text = (a.get_text() or "").lower()
+        if "contact" in href or "contact" in text:
+            return urljoin(base_url, a["href"])
+    return None
+
+
+def _page_has_form(html: str) -> bool:
+    """Check if the page has a form (likely a contact form)."""
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find("form") is not None
+
+
+def scrape_email_from_website(url: str) -> str | None:
+    """Fetch a distributor's website and extract a contact email.
+
+    Returns:
+        "email@example.com" — if a real email was found
+        "form:http://example.com/contact" — if only a contact form exists
+        None — if nothing found or site unreachable
+    """
+    if not url:
+        return None
+
+    try:
+        resp = _HTTP_CLIENT.get(url)
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    homepage_html = resp.text
+
+    # Try homepage first
+    email = _extract_best_email(homepage_html)
+    if email:
+        return email
+
+    # Look for a contact page
+    contact_url = _find_contact_page_url(homepage_html, str(resp.url))
+    if contact_url:
+        try:
+            contact_resp = _HTTP_CLIENT.get(contact_url)
+            contact_resp.raise_for_status()
+            contact_html = contact_resp.text
+
+            email = _extract_best_email(contact_html)
+            if email:
+                return email
+
+            # No email but has a form — return form URL
+            if _page_has_form(contact_html):
+                return f"form:{contact_url}"
+        except Exception:
+            pass
+
+    return None
+
+
 # ── Orchestration ────────────────────────────────────────────────────────────
 
 def find_distributors(location: str, categories: list[str]) -> list[dict]:
@@ -154,12 +268,23 @@ def store_distributors(
         ).first()
 
         if not dist:
+            # Try to find a contact email from their website
+            email = d.get("email") or scrape_email_from_website(d.get("website"))
+            if email and email.startswith("form:"):
+                print(f"    {d['name']}: contact form at {email[5:]}")
+            elif email:
+                print(f"    {d['name']}: {email}")
+            else:
+                print(f"    {d['name']}: no email found")
+
             dist = Distributor(
                 name=d["name"],
                 location=d.get("location", ""),
                 phone=d.get("phone"),
-                email=d.get("email"),
+                email=email,
                 website=d.get("website"),
+                rating=d.get("rating"),
+                rating_count=d.get("rating_count"),
                 source=d.get("source", "Unknown"),
                 categories_served=", ".join(d.get("categories_served", [])),
             )
@@ -195,7 +320,53 @@ def store_distributors(
             processed.append(dist)
 
     session.commit()
+
+    with_email = sum(1 for d in processed if d.email and not d.email.startswith("form:"))
+    with_form = sum(1 for d in processed if d.email and d.email.startswith("form:"))
+    print(f"  Contact info: {with_email}/{len(processed)} with email, {with_form} with contact form")
+
     return processed
+
+
+def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> None:
+    """Use Claude to infer emails for distributors that have a website but no email."""
+    missing = [d for d in distributors if d.website and not d.email]
+    if not missing:
+        return
+
+    print(f"  AI fallback: looking up emails for {len(missing)} distributors...")
+
+    lines = []
+    for i, d in enumerate(missing, 1):
+        lines.append(f"{i}. {d.name} | {d.location} | {d.website}")
+
+    prompt = (
+        "Given these food distributors (name, location, website), "
+        "reply with ONLY their contact email, one per line, in the same order. "
+        "If you cannot determine the email, write NULL.\n\n"
+        + "\n".join(lines)
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result_lines = response.content[0].text.strip().splitlines()
+
+        for dist, line in zip(missing, result_lines):
+            email = line.strip()
+            if email and email.upper() != "NULL":
+                dist.email = email.lower()
+                print(f"    AI found: {dist.name} → {dist.email}")
+            else:
+                print(f"    AI: {dist.name} → not found")
+
+        session.commit()
+    except Exception as e:
+        print(f"  AI email fallback failed: {e}")
 
 
 def find_local_distributors(session: Session, location: str) -> list[Distributor]:
@@ -204,6 +375,7 @@ def find_local_distributors(session: Session, location: str) -> list[Distributor
     1. Gather all ingredient categories from DB
     2. Find distributors via best available API
     3. Store and link to ingredients
+    4. AI fallback for missing emails
     """
     ingredients = session.query(Ingredient).all()
     if not ingredients:
@@ -220,5 +392,9 @@ def find_local_distributors(session: Session, location: str) -> list[Distributor
 
     print(f"  Found {len(distributor_data)} distributors. Storing...")
     distributors = store_distributors(session, distributor_data, ingredients)
+
+    # AI fallback for distributors with website but no email
+    _ai_email_fallback(session, distributors)
+
     print(f"Step 3 complete: {len(distributors)} distributors stored.")
     return distributors
