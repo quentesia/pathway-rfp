@@ -4,10 +4,45 @@ from __future__ import annotations
 
 import os
 import requests
+from functools import wraps
 
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
+
+def _log_provider(message: str) -> None:
+    """Emit a consistent provider log line."""
+    print(f"  [LLM] {message}")
+
+
+def _with_provider_fallback(fn):
+    """Decorator: run Anthropic first, then OpenAI fallback with consistent logs."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        task_label = kwargs.get("task_label", "llm-task")
+        plan = fn(*args, **kwargs)
+        errors = []
+
+        try:
+            text = plan["anthropic"]()
+            _log_provider(f"{task_label}: using Anthropic ({os.getenv('ANTHROPIC_MODEL', ANTHROPIC_MODEL)})")
+            return text
+        except Exception as e:
+            _log_provider(f"{task_label}: Anthropic failed ({e}) -> trying OpenAI fallback")
+            errors.append(f"{plan['anthropic_error']}: {e}")
+
+        try:
+            text = plan["openai"]()
+            _log_provider(f"{task_label}: using OpenAI ({os.getenv('OPENAI_MODEL', OPENAI_MODEL)})")
+            return text
+        except Exception as e:
+            _log_provider(f"{task_label}: OpenAI fallback failed ({e})")
+            errors.append(f"{plan['openai_error']}: {e}")
+
+        raise RuntimeError("All LLM providers failed. " + " | ".join(errors))
+
+    return wrapper
 
 
 def _extract_openai_text(data: dict) -> str:
@@ -122,42 +157,40 @@ def _call_anthropic_image(
     return resp.content[0].text
 
 
+@_with_provider_fallback
 def generate_json_text(
     prompt: str,
     max_tokens: int = 2048,
     system_prompt: str | None = None,
-) -> str:
+    task_label: str = "text-json",
+) -> dict:
     """Generate JSON text with Anthropic primary, OpenAI fallback."""
-    errors = []
-
-    try:
-        return _call_anthropic_text(prompt, max_tokens=max_tokens, system_prompt=system_prompt)
-    except Exception as e:
-        errors.append(f"Anthropic failed: {e}")
-
-    try:
+    def _openai_call() -> str:
         input_blocks = []
         if system_prompt:
             input_blocks.append({"role": "system", "content": [{"type": "input_text", "text": system_prompt}]})
         input_blocks.append({"role": "user", "content": [{"type": "input_text", "text": prompt}]})
         return _call_openai(input_blocks, max_tokens=max_tokens)
-    except Exception as e:
-        errors.append(f"OpenAI failed: {e}")
 
-    raise RuntimeError("All LLM providers failed. " + " | ".join(errors))
+    return {
+        "anthropic": lambda: _call_anthropic_text(prompt, max_tokens=max_tokens, system_prompt=system_prompt),
+        "openai": _openai_call,
+        "anthropic_error": "Anthropic failed",
+        "openai_error": "OpenAI failed",
+    }
 
 
+@_with_provider_fallback
 def generate_json_with_image(
     system_prompt: str,
     user_text: str,
     image_data_b64: str,
     media_type: str,
     max_tokens: int = 16384,
-) -> str:
+    task_label: str = "vision-json",
+) -> dict:
     """Generate JSON with image input using Anthropic primary, OpenAI fallback."""
-    errors = []
-
-    try:
+    def _anthropic_call() -> str:
         return _call_anthropic_image(
             system_prompt=system_prompt,
             user_text=user_text,
@@ -165,10 +198,8 @@ def generate_json_with_image(
             media_type=media_type,
             max_tokens=max_tokens,
         )
-    except Exception as e:
-        errors.append(f"Anthropic vision failed: {e}")
 
-    try:
+    def _openai_call() -> str:
         input_blocks = [
             {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
             {
@@ -180,7 +211,10 @@ def generate_json_with_image(
             },
         ]
         return _call_openai(input_blocks, max_tokens=max_tokens)
-    except Exception as e:
-        errors.append(f"OpenAI vision failed: {e}")
 
-    raise RuntimeError("All LLM providers failed. " + " | ".join(errors))
+    return {
+        "anthropic": _anthropic_call,
+        "openai": _openai_call,
+        "anthropic_error": "Anthropic vision failed",
+        "openai_error": "OpenAI vision failed",
+    }

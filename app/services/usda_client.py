@@ -368,7 +368,11 @@ def _match_ingredients_with_claude(ingredient_names: list[str]) -> dict[str, tup
     # Parse the JSON response with Pydantic
     from app.utils import strip_json_fences
     try:
-        response_text = strip_json_fences(generate_json_text(prompt, max_tokens=4096))
+        response_text = strip_json_fences(generate_json_text(
+            prompt,
+            max_tokens=4096,
+            task_label="bls-match",
+        ))
     except Exception as e:
         print(f"  LLM matching failed: {e}")
         print("  Falling back to keyword matching")

@@ -8,6 +8,56 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.models import Ingredient, Recipe, RecipeIngredient
 
+STANDARD_CATEGORIES = [
+    "Produce",
+    "Meat & Poultry",
+    "Seafood",
+    "Dairy & Eggs",
+    "Dry Goods & Pantry",
+    "Frozen Foods",
+    "Bakery & Breads",
+    "Beverages",
+    "Oils, Fats & Sauces",
+    "Other",
+]
+
+_CATEGORY_ALIASES = {
+    "produce": "Produce",
+    "vegetable": "Produce",
+    "vegetables": "Produce",
+    "fruit": "Produce",
+    "fruits": "Produce",
+    "meat": "Meat & Poultry",
+    "poultry": "Meat & Poultry",
+    "meat and poultry": "Meat & Poultry",
+    "meat & poultry": "Meat & Poultry",
+    "seafood": "Seafood",
+    "fish": "Seafood",
+    "dairy": "Dairy & Eggs",
+    "eggs": "Dairy & Eggs",
+    "dairy and eggs": "Dairy & Eggs",
+    "dairy & eggs": "Dairy & Eggs",
+    "dry goods": "Dry Goods & Pantry",
+    "pantry": "Dry Goods & Pantry",
+    "dry goods and pantry": "Dry Goods & Pantry",
+    "dry goods & pantry": "Dry Goods & Pantry",
+    "frozen": "Frozen Foods",
+    "frozen foods": "Frozen Foods",
+    "bakery": "Bakery & Breads",
+    "breads": "Bakery & Breads",
+    "bakery and breads": "Bakery & Breads",
+    "bakery & breads": "Bakery & Breads",
+    "beverages": "Beverages",
+    "drinks": "Beverages",
+    "oils": "Oils, Fats & Sauces",
+    "fats": "Oils, Fats & Sauces",
+    "sauces": "Oils, Fats & Sauces",
+    "oils fats and sauces": "Oils, Fats & Sauces",
+    "oils, fats & sauces": "Oils, Fats & Sauces",
+    "oils, fats and sauces": "Oils, Fats & Sauces",
+    "other": "Other",
+}
+
 
 def strip_json_fences(text: str) -> str:
     """Strip markdown code fences from LLM JSON responses."""
@@ -15,6 +65,33 @@ def strip_json_fences(text: str) -> str:
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return text
+
+
+def normalize_category_name(category: str | None) -> str:
+    """Normalize category labels into canonical values."""
+    if not category:
+        return "Other"
+    key = category.strip().lower().replace("/", " ").replace("-", " ")
+    key = " ".join(key.split())
+    return _CATEGORY_ALIASES.get(key, "Other")
+
+
+def normalize_category_list(categories: list[str] | None) -> list[str]:
+    """Normalize and deduplicate category labels."""
+    if not categories:
+        return []
+    out = {normalize_category_name(c) for c in categories}
+    out.discard("Other")
+    return sorted(out) or ["Other"]
+
+
+def category_tag(category: str | None) -> str:
+    """Return a stable tag for category filtering/search."""
+    normalized = normalize_category_name(category)
+    slug = normalized.lower()
+    slug = slug.replace("&", "and").replace(",", "")
+    slug = "-".join(slug.split())
+    return f"cat:{slug}"
 
 
 # ── Unit conversion ────────────────────────────────────────────────────────
@@ -153,7 +230,7 @@ def estimate_category_weekly_covers(
     """Estimate per-category weekly covers from Claude popularity multipliers."""
     by_category: dict[str, list[float]] = {}
     for recipe in recipes:
-        category = recipe.category or "Other"
+        category = normalize_category_name(recipe.category)
         popularity = recipe.popularity_multiplier or 1.0
         est = max(0.0, baseline_weekly_covers * popularity)
         by_category.setdefault(category, []).append(est)

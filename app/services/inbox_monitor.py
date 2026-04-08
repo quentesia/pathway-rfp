@@ -77,7 +77,11 @@ def parse_quote_from_email(email_body: str, requested_ingredients: list[str]) ->
 
     try:
         from app.utils import strip_json_fences
-        text = strip_json_fences(generate_json_text(prompt, max_tokens=2048))
+        text = strip_json_fences(generate_json_text(
+            prompt,
+            max_tokens=2048,
+            task_label="quote-parse",
+        ))
         return ParsedQuoteList.model_validate_json(text)
     except Exception as e:
         print(f"  Error parsing quote: {e}")
@@ -102,7 +106,13 @@ Thank you for your quote. We noticed the following items were missing or unclear
 
 {items}
 
-Could you please provide updated pricing for these items at your earliest convenience?
+Could you please confirm availability and provide updated pricing/unit details for these items?
+
+Also, for the quoted items, please share:
+- Minimum order quantities (MOQs)
+- Any bulk/volume discount tiers
+- Delivery schedule and lead times
+- Payment terms
 
 Best regards,
 Procurement Team
@@ -217,19 +227,32 @@ def collect_quotes(
             if l.supply_status == "unconfirmed" and l.ingredient.name not in parsed.clarification_needed
         ]
         needs_clarification = list(parsed.clarification_needed) + [l.ingredient.name for l in unquoted]
+        # If delivery terms are missing for confirmed items, request clarification.
+        missing_delivery_terms = [
+            l.ingredient.name for l in links
+            if l.supply_status == "confirmed" and not l.delivery_terms
+        ]
+        needs_clarification = sorted(set(needs_clarification))
+        missing_delivery_terms = sorted(set(missing_delivery_terms))
+        needs_followup = bool(needs_clarification or missing_delivery_terms)
 
         to_email = _make_yopmail(distributor.name) if mock_recipient == "demo" else distributor.email
         subject = f"Re: Request for Proposal — {distributor.name}"
 
-        if not needs_clarification:
+        if not needs_followup:
             distributor.rfp_status = "completed"
             _status(f"  {distributor.name}: all items quoted — sending thank you")
             body = _compose_thank_you(distributor.name)
             send_email(service, sender, to_email, subject, body)
         else:
             distributor.rfp_status = "needs_clarification"
-            _status(f"  {distributor.name}: {len(needs_clarification)} items need clarification — sending follow-up")
-            body = _compose_followup(distributor.name, needs_clarification)
+            _status(
+                f"  {distributor.name}: follow-up needed "
+                f"({len(needs_clarification)} ingredient clarifications, "
+                f"{len(missing_delivery_terms)} delivery-term clarifications)"
+            )
+            followup_items = sorted(set(needs_clarification + missing_delivery_terms))
+            body = _compose_followup(distributor.name, followup_items)
             send_email(service, sender, to_email, subject, body)
 
     if restaurant:

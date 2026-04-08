@@ -11,6 +11,7 @@
 ## Would Improves
 
 - Switch to Claude structured outputs / tool_use instead of JSON-in-text with fence stripping — eliminates the parse-and-validate loop
+- Add texting for the phone-only companies
 - Parse popularity of dishes through reviews on Google and Yelp as a starting point. Currently, claude infers popularity.
 - Add a clear algorithm for analyzing the optimal order placement based on spoilage, freezer size, and distributor delivery, discounts and pricing.
 - Better estimation of how many times each dish is ordered per week. Currently, takes 40 as an average for all dishes.

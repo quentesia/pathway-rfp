@@ -20,8 +20,11 @@ from app.services.email_sender import send_rfp_emails
 from app.services.inbox_monitor import collect_quotes
 from app.utils import (
     aggregate_quantities,
+    category_tag,
     estimate_category_weekly_covers,
     load_category_cover_overrides_from_env,
+    normalize_category_name,
+    normalize_category_list,
 )
 
 load_dotenv()
@@ -360,8 +363,32 @@ if ps["step3_done"]:
             Ingredient.id.in_(link_ing_ids)
         ).all()} if link_ing_ids else {}
 
-        contactable = [d for d in distributors if d.email]
-        phone_only = [d for d in distributors if not d.email]
+        dist_category_map: dict[int, list[str]] = {}
+        for dist in distributors:
+            linked_categories = {
+                normalize_category_name(ingredients_map[l.ingredient_id].category)
+                for l in all_links
+                if l.distributor_id == dist.id and l.ingredient_id in ingredients_map
+            }
+            served_categories = set(normalize_category_list(dist.categories_served_list))
+            combined = sorted(served_categories | linked_categories)
+            dist_category_map[dist.id] = combined or ["Other"]
+
+        all_step3_categories = sorted({c for cats in dist_category_map.values() for c in cats})
+        selected_step3_categories = st.multiselect(
+            "Filter Distributors by Category",
+            all_step3_categories,
+            key="step3_category_filter",
+        )
+
+        def _matches_selected_categories(dist: Distributor) -> bool:
+            if not selected_step3_categories:
+                return True
+            cats = dist_category_map.get(dist.id, [])
+            return any(cat in selected_step3_categories for cat in cats)
+
+        contactable = [d for d in distributors if d.email and _matches_selected_categories(d)]
+        phone_only = [d for d in distributors if not d.email and _matches_selected_categories(d)]
 
         def _show_distributor(dist):
             if dist.rating and dist.rating_count:
@@ -383,11 +410,20 @@ if ps["step3_done"]:
                     st.write(f"**Email:** {dist.email or 'N/A'}")
                 st.write(f"**Website:** {dist.website or 'N/A'}")
                 st.write(f"**Source:** {dist.source}")
+                categories = dist_category_map.get(dist.id, [])
+                tags = [category_tag(c) for c in categories]
+                st.write(f"**Categories:** {', '.join(categories)}")
+                st.write(f"**Category Tags:** {', '.join(tags)}")
 
                 links = [l for l in all_links if l.distributor_id == dist.id]
                 ing_names = [ingredients_map[l.ingredient_id].name for l in links if l.ingredient_id in ingredients_map]
                 if ing_names:
                     st.write(f"**Possible Supplies:** {', '.join(ing_names)}")
+
+        if selected_step3_categories:
+            st.caption(f"Showing distributors matching: {', '.join(selected_step3_categories)}")
+        if not contactable and not phone_only:
+            st.info("No distributors match the selected category filter.")
 
         for dist in contactable:
             _show_distributor(dist)
@@ -620,6 +656,23 @@ if ps["step5_done"]:
             bls_map = {b.ingredient_id: b for b in session.query(USDAPrice).filter(
                 USDAPrice.ingredient_id.in_(ing_ids)
             ).all()}
+            ingredient_category_map = {
+                ing_id: normalize_category_name(ing.category)
+                for ing_id, ing in ingredients_map.items()
+            }
+            all_step5_categories = sorted(set(ingredient_category_map.values()))
+            selected_step5_categories = st.multiselect(
+                "Filter Quote Results by Category",
+                all_step5_categories,
+                key="step5_category_filter",
+            )
+            quoted_filtered = [
+                l for l in quoted
+                if not selected_step5_categories
+                or ingredient_category_map.get(l.ingredient_id, "Other") in selected_step5_categories
+            ]
+            if selected_step5_categories and not quoted_filtered:
+                st.info("No quoted items match the selected category filter.")
 
             # ── Best Prices (primary table) ──
             st.subheader("Best Prices — Weekly Order Estimate")
@@ -645,7 +698,7 @@ if ps["step5_done"]:
                 )
 
             seen = {}
-            for link in quoted:
+            for link in quoted_filtered:
                 ing = ingredients_map[link.ingredient_id]
                 if ing.name not in seen or (link.quoted_price and link.quoted_price < seen[ing.name][1]):
                     dist = distributors_map[link.distributor_id]
@@ -661,6 +714,8 @@ if ps["step5_done"]:
 
                 row = {
                     "Ingredient": ing_name,
+                    "Category": ingredient_category_map.get(ing_id, "Other"),
+                    "Category Tag": category_tag(ingredient_category_map.get(ing_id, "Other")),
                     "Best Distributor": dist_name,
                     "Unit Price": f"${price:.2f}/{unit or 'unit'}",
                     "Weekly Qty": f"{weekly_qty:.0f} {qty_unit}" if weekly_qty else "N/A",
@@ -689,7 +744,7 @@ if ps["step5_done"]:
             # ── Full comparison (expandable) ──
             with st.expander("Full Quote Comparison (all distributors)", expanded=False):
                 comparison = []
-                for link in quoted:
+                for link in quoted_filtered:
                     dist = distributors_map[link.distributor_id]
                     ing = ingredients_map[link.ingredient_id]
                     bls = bls_map.get(link.ingredient_id)
@@ -711,6 +766,8 @@ if ps["step5_done"]:
                     comparison.append({
                         "Distributor": dist.name,
                         "Ingredient": ing.name,
+                        "Category": ingredient_category_map.get(link.ingredient_id, "Other"),
+                        "Category Tag": category_tag(ingredient_category_map.get(link.ingredient_id, "Other")),
                         "Quoted Price": f"${link.quoted_price:.2f}",
                         "Unit": link.quoted_unit or "N/A",
                         "Wholesale Ref (50% BLS)": bls_str,
@@ -723,6 +780,11 @@ if ps["step5_done"]:
             not_supplied = session.query(DistributorIngredient).filter_by(
                 supply_status="does_not_supply"
             ).all()
+            if selected_step5_categories:
+                not_supplied = [
+                    l for l in not_supplied
+                    if ingredient_category_map.get(l.ingredient_id, "Other") in selected_step5_categories
+                ]
             if not_supplied:
                 ns_dist_ids = {l.distributor_id for l in not_supplied}
                 ns_ing_ids = {l.ingredient_id for l in not_supplied}
@@ -735,9 +797,12 @@ if ps["step5_done"]:
                 with st.expander(f"Items Not Supplied ({len(not_supplied)})", expanded=False):
                     omitted_data = []
                     for link in not_supplied:
+                        category = normalize_category_name(ns_ings[link.ingredient_id].category)
                         omitted_data.append({
                             "Distributor": ns_dists[link.distributor_id].name,
                             "Ingredient": ns_ings[link.ingredient_id].name,
+                            "Category": category,
+                            "Category Tag": category_tag(category),
                         })
                     st.table(omitted_data)
         else:

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.models import Ingredient, Distributor, DistributorIngredient
+from app.utils import normalize_category_name, normalize_category_list
 
 # ── Serper (google.serper.dev) ────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ def search_serper_api(location: str, query: str, api_key: str, category: str = "
     resp.raise_for_status()
     results = resp.json().get("places", [])
 
+    normalized_cat = normalize_category_name(category) if category else ""
     distributors = []
     for r in results:
         distributors.append({
@@ -43,7 +45,7 @@ def search_serper_api(location: str, query: str, api_key: str, category: str = "
             "rating": r.get("rating"),
             "rating_count": r.get("ratingCount"),
             "source": "Serper Places API",
-            "categories_served": [category] if category else [],
+            "categories_served": [normalized_cat] if normalized_cat else [],
         })
     return distributors
 
@@ -77,12 +79,17 @@ def search_llm_fallback(location: str, categories: list[str]) -> list[dict]:
     try:
         from app.services.llm_client import generate_json_text
         from app.utils import strip_json_fences
-        text = strip_json_fences(generate_json_text(prompt, max_tokens=2048))
+        text = strip_json_fences(generate_json_text(
+            prompt,
+            max_tokens=2048,
+            task_label="distributor-search",
+        ))
         parsed = DistributorList.model_validate_json(text)
         distributors = []
         for d in parsed.distributors:
             d_dict = d.model_dump()
             d_dict["source"] = "LLM inference (Anthropic/OpenAI)"
+            d_dict["categories_served"] = normalize_category_list(d_dict.get("categories_served", []))
             distributors.append(d_dict)
             
         return distributors
@@ -256,10 +263,11 @@ def store_distributors(
     # Build category -> ingredient mapping
     cat_to_ingredients: dict[str, list[Ingredient]] = {}
     for ing in ingredients:
-        cat = ing.category or "Other"
+        cat = normalize_category_name(ing.category)
         cat_to_ingredients.setdefault(cat, []).append(ing)
 
     for d in distributor_data:
+        normalized_served_cats = normalize_category_list(d.get("categories_served", []))
         # Check if distributor already exists by name (case-insensitive)
         dist = session.query(Distributor).filter(
             Distributor.name.ilike(d["name"])
@@ -284,10 +292,15 @@ def store_distributors(
                 rating=d.get("rating"),
                 rating_count=d.get("rating_count"),
                 source=d.get("source", "Unknown"),
-                categories_served=json.dumps(d.get("categories_served", [])),
+                categories_served=json.dumps(normalized_served_cats),
             )
             session.add(dist)
             session.flush()
+        else:
+            merged_cats = sorted(
+                set(normalize_category_list(dist.categories_served_list)) | set(normalized_served_cats)
+            )
+            dist.categories_served = json.dumps(merged_cats)
 
         # Get existing links to avoid duplicates
         existing_links = {
@@ -296,7 +309,7 @@ def store_distributors(
         }
 
         # Link distributor to ingredients matching its served categories
-        served_cats = d.get("categories_served", [])
+        served_cats = normalized_served_cats
         ingredients_to_link = []
         if served_cats:
             for cat in served_cats:
@@ -358,7 +371,11 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
     try:
         from app.services.llm_client import generate_json_text
         from app.utils import strip_json_fences
-        text = strip_json_fences(generate_json_text(prompt, max_tokens=1024))
+        text = strip_json_fences(generate_json_text(
+            prompt,
+            max_tokens=1024,
+            task_label="distributor-email-lookup",
+        ))
         parsed = EmailLookupResult.model_validate_json(text)
 
         for dist, result in zip(missing, parsed.results):
@@ -395,7 +412,7 @@ def find_local_distributors(session: Session, location: str, restaurant_id: int 
         _status("No ingredients found. Run Step 1 first.")
         return []
 
-    categories = list({ing.category or "Other" for ing in ingredients})
+    categories = sorted({normalize_category_name(ing.category) for ing in ingredients})
     _status(f"Searching for distributors in {location} across {len(categories)} categories...")
 
     distributor_data = find_distributors(location, categories, on_status=on_status)

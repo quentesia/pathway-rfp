@@ -26,7 +26,7 @@ CRITICAL RULES:
   oils, garnishes, sauces.
 - Units MUST be one of: each, pinch, tsp, tbsp, cup, pt, qt, gal, ml, l, g, kg, oz, lb
 - Categories MUST be one of: Produce, Meat & Poultry, Seafood, Dairy & Eggs,
-  Dry Goods & Pantry, Frozen Foods, Bakery & Breads, Beverages, Oils Fats & Sauces, Other
+  Dry Goods & Pantry, Frozen Foods, Bakery & Breads, Beverages, Oils, Fats & Sauces, Other
 
 Your response MUST be valid JSON conforming to this exact schema:
 
@@ -92,8 +92,9 @@ We requested quotes for these specific ingredients:
 
 RULES:
 - Extract all pricing, units, and delivery notes for any mentioned ingredients.
-- For `clarification_needed`: ONLY include ingredients where the distributor explicitly mentioned they can supply it, BUT forgot the exact price or unit.
-- If the distributor COMPLETELY OMITTED an ingredient from their reply, assume they do NOT supply it. Do NOT put omitted ingredients in `clarification_needed`.
+- For `not_supplied`: include ONLY ingredients the distributor EXPLICITLY says they cannot supply.
+- For `clarification_needed`: include ingredients that are missing key details (price/unit), OR were omitted entirely from the reply.
+- Do NOT assume omitted ingredients are not supplied unless the distributor explicitly said so.
 
 Email body you must parse:
 {email_body}

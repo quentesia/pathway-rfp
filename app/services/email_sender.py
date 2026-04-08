@@ -231,7 +231,11 @@ Map ALL fillable fields, using empty string for fields you can't match."""
         from app.services.llm_client import generate_json_text
         import json
         from app.utils import strip_json_fences
-        raw = strip_json_fences(generate_json_text(prompt, max_tokens=1024))
+        raw = strip_json_fences(generate_json_text(
+            prompt,
+            max_tokens=1024,
+            task_label="contact-form-map",
+        ))
         mappings = json.loads(raw)
 
         # Substitute "message" placeholder with actual body

@@ -13,13 +13,10 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.models import Restaurant, Recipe, Ingredient, RecipeIngredient
+from app.utils import STANDARD_CATEGORIES, normalize_category_name
 
 VALID_UNITS = {"each", "pinch", "tsp", "tbsp", "cup", "pt", "qt", "gal", "ml", "l", "g", "kg", "oz", "lb"}
-VALID_CATEGORIES = {
-    "Produce", "Meat & Poultry", "Seafood", "Dairy & Eggs",
-    "Dry Goods & Pantry", "Frozen Foods", "Bakery & Breads",
-    "Beverages", "Oils, Fats & Sauces", "Other",
-}
+VALID_CATEGORIES = set(STANDARD_CATEGORIES)
 
 
 # ── Pydantic response schema ────────────────────────────────────────────────
@@ -42,9 +39,10 @@ class IngredientEntry(BaseModel):
     @field_validator("category")
     @classmethod
     def category_must_be_valid(cls, v: str) -> str:
-        if v not in VALID_CATEGORIES:
+        normalized = normalize_category_name(v)
+        if normalized not in VALID_CATEGORIES:
             return "Other"
-        return v
+        return normalized
 
 
 class RecipeEntry(BaseModel):
@@ -94,6 +92,7 @@ def parse_menu_image(image_path: str) -> MenuParseResult:
         image_data_b64=image_data,
         media_type=media_type,
         max_tokens=16384,
+        task_label="menu-parse",
     )
 
     from app.utils import strip_json_fences
