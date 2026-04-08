@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+token.json
+credentials.json
+rfp_pipeline.db
+.venv/
+*.egg-info/
