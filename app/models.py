@@ -72,6 +72,18 @@ class RecipeIngredient(Base):
     ingredient = relationship("Ingredient", back_populates="recipe_ingredients")
 
 
+# ── BLS Cache (persists across resets) ───────────────────────────────────────
+
+class BLSCache(Base):
+    __tablename__ = "bls_cache"
+
+    series_id = Column(String, nullable=False, primary_key=True)
+    fetched_month = Column(String, nullable=False, primary_key=True)
+    description = Column(String)
+    unit = Column(String)
+    data_json = Column(Text)
+
+
 # ── Pricing (Step 2) ─────────────────────────────────────────────────────────
 
 class USDAPrice(Base):
@@ -82,7 +94,7 @@ class USDAPrice(Base):
     usda_item_name = Column(String)
     price = Column(Float)
     unit = Column(String)
-    date = Column(String)
+    date = Column(Date)
     source = Column(String, default="BLS Average Price Data")
     created_at = Column(Date, default=_today)
 

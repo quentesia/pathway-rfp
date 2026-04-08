@@ -11,58 +11,42 @@ last digits identify the specific food item.
 
 import requests
 import json
-import sqlite3
 from datetime import datetime, date
-from pathlib import Path
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from app.models import Ingredient, USDAPrice
+from app.models import Ingredient, USDAPrice, BLSCache
 
 BLS_API_URL = "https://api.bls.gov/publicAPI/v1/timeseries/data/"
-BLS_CACHE_DB = Path(__file__).parent.parent.parent / "bls_cache.db"
 
 
-def _init_cache():
-    """Create the BLS cache table if it doesn't exist."""
-    conn = sqlite3.connect(BLS_CACHE_DB)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS bls_prices (
-            series_id TEXT NOT NULL,
-            description TEXT,
-            unit TEXT,
-            data_json TEXT,
-            fetched_month TEXT NOT NULL,
-            PRIMARY KEY (series_id, fetched_month)
-        )
-    """)
-    conn.commit()
-    return conn
-
-
-def _get_cached_data(conn: sqlite3.Connection) -> dict | None:
+def _get_cached_data(session: Session) -> dict | None:
     """Return cached BLS data if it was fetched this month, else None."""
     current_month = date.today().strftime("%Y-%m")
-    rows = conn.execute(
-        "SELECT series_id, description, unit, data_json FROM bls_prices WHERE fetched_month = ?",
-        (current_month,),
-    ).fetchall()
+    rows = session.query(BLSCache).filter_by(fetched_month=current_month).all()
     if not rows:
         return None
     return {
-        row[0]: {"description": row[1], "unit": row[2], "data": json.loads(row[3])}
+        row.series_id: {"description": row.description, "unit": row.unit, "data": json.loads(row.data_json)}
         for row in rows
     }
 
 
-def _save_to_cache(conn: sqlite3.Connection, series_id: str, description: str,
+def _save_to_cache(session: Session, series_id: str, description: str,
                    unit: str, data_points: list):
     """Save BLS data to the cache for this month."""
     current_month = date.today().strftime("%Y-%m")
-    conn.execute(
-        "INSERT OR REPLACE INTO bls_prices (series_id, description, unit, data_json, fetched_month) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (series_id, description, unit, json.dumps(data_points), current_month),
-    )
+    existing = session.query(BLSCache).filter_by(
+        series_id=series_id, fetched_month=current_month
+    ).first()
+    if existing:
+        existing.description = description
+        existing.unit = unit
+        existing.data_json = json.dumps(data_points)
+    else:
+        session.add(BLSCache(
+            series_id=series_id, fetched_month=current_month,
+            description=description, unit=unit, data_json=json.dumps(data_points),
+        ))
 
 # ── BLS series ID → human-readable item + matching keywords ──────────────────
 # Each entry: (series_id, bls_item_description, unit, [keywords])
@@ -221,7 +205,7 @@ BLS_FOOD_SERIES = [
 
     # ── Vegetables (Fresh) ───────────────────────────────────────────────
     ("APU0000712112", "Potatoes, white, per lb", "per lb",
-     ["potato", "potatoes"]),
+     ["potato", "potatoes", "sweet potato", "sweet potatoes", "yam", "yams"]),
     ("APU0000712211", "Lettuce, iceberg, per lb", "per lb",
      ["iceberg lettuce"]),
     ("APU0000FL2101", "Lettuce, romaine, per lb", "per lb",
@@ -304,9 +288,6 @@ BLS_FOOD_SERIES = [
     ("APU0000718631", "Pork and beans, canned, per 16 oz", "per 16 oz",
      ["pork and beans", "baked beans"]),
 
-    # ── Sweet Potatoes (use potato price as proxy) ───────────────────────
-    ("APU0000712112", "Potatoes, white, per lb", "per lb",
-     ["sweet potato", "sweet potatoes", "yam", "yams"]),
 ]
 
 
@@ -390,9 +371,8 @@ def _match_ingredients_with_claude(ingredient_names: list[str]) -> dict[str, tup
     )
 
     # Parse the JSON response with Pydantic
-    response_text = response.content[0].text.strip()
-    if response_text.startswith("```"):
-        response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    from app.utils import strip_json_fences
+    response_text = strip_json_fences(response.content[0].text)
 
     try:
         parsed = BLSMatchResult.model_validate_json(response_text)
@@ -444,9 +424,9 @@ def _keyword_match(ingredient_name: str) -> tuple | None:
 def fetch_market_trends(session: Session) -> list[USDAPrice]:
     """
     Full Step 2 pipeline:
-    1. Check bls_cache.db for this month's data (persists across pipeline DB resets)
+    1. Check bls_cache table for this month's data (persists across pipeline resets)
     2. If cache miss, make ONE batch BLS API call and store in cache
-    3. Match ingredients to cached series and write USDAPrice records to pipeline DB
+    3. Match ingredients to cached series and write USDAPrice records
     """
     ingredients = session.query(Ingredient).all()
     if not ingredients:
@@ -454,8 +434,7 @@ def fetch_market_trends(session: Session) -> list[USDAPrice]:
         return []
 
     # ── Check / populate the persistent BLS cache ────────────────────────
-    cache_conn = _init_cache()
-    cached = _get_cached_data(cache_conn)
+    cached = _get_cached_data(session)
 
     if cached:
         print(f"Step 2: Using cached BLS data ({len(cached)} series, "
@@ -475,12 +454,10 @@ def fetch_market_trends(session: Session) -> list[USDAPrice]:
         cached = {}
         for series_id, data_points in bls_data.items():
             desc, unit = series_info.get(series_id, ("Unknown", ""))
-            _save_to_cache(cache_conn, series_id, desc, unit, data_points)
+            _save_to_cache(session, series_id, desc, unit, data_points)
             cached[series_id] = {"description": desc, "unit": unit, "data": data_points}
-        cache_conn.commit()
-        print(f"  Cached {len(cached)} series to bls_cache.db")
-
-    cache_conn.close()
+        session.commit()
+        print(f"  Cached {len(cached)} series to bls_cache")
 
     # ── Clear any old USDAPrice rows (pipeline DB may have been reset) ───
     session.query(USDAPrice).delete()
@@ -540,6 +517,10 @@ def fetch_market_trends(session: Session) -> list[USDAPrice]:
         period = latest.get("periodName", "")
         year = latest.get("year", "")
         date_str = f"{period} {year}"
+        try:
+            price_date = datetime.strptime(f"1 {date_str}", "%d %B %Y").date()
+        except ValueError:
+            price_date = date.today()
 
         # Build a trend summary from available data points
         trend_prices = [float(dp["value"]) for dp in data_points[:6] if dp.get("value")]
@@ -555,7 +536,7 @@ def fetch_market_trends(session: Session) -> list[USDAPrice]:
             usda_item_name=description,
             price=price_val,
             unit=unit,
-            date=date_str,
+            date=price_date,
             source=f"BLS Average Price | {series_id} | Trend: {trend_note}",
         )
         session.add(record)

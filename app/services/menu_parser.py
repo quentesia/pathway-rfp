@@ -110,9 +110,8 @@ def parse_menu_image(image_path: str) -> MenuParseResult:
             f"Got {len(response.content[0].text)} chars. Increase max_tokens."
         )
 
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    from app.utils import strip_json_fences
+    raw = strip_json_fences(response.content[0].text)
 
     data = json.loads(raw)
     return MenuParseResult.model_validate(data)

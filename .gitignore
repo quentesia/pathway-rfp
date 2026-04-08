@@ -4,7 +4,6 @@ __pycache__/
 token.json
 credentials.json
 rfp_pipeline.db
-bls_cache.db
 .venv/
 *.egg-info/
 rules.pdf

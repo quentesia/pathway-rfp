@@ -85,10 +85,8 @@ def parse_quote_from_email(email_body: str, requested_ingredients: list[str]) ->
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1]
-            text = text.rsplit("```", 1)[0]
+        from app.utils import strip_json_fences
+        text = strip_json_fences(response.content[0].text)
         return ParsedQuoteList.model_validate_json(text)
     except Exception as e:
         print(f"  Error parsing quote: {e}")

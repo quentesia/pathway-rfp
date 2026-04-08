@@ -46,7 +46,6 @@ def _check_existing_data(restaurant_id: int) -> dict:
     """Check which pipeline steps already have data in DB for this restaurant."""
     session = SessionLocal()
     try:
-        # Step 2: any USDAPrice records for restaurant's ingredients
         ingredient_ids = [ri.ingredient_id for ri in
             session.query(RecipeIngredient).join(Recipe).filter(
                 Recipe.restaurant_id == restaurant_id
@@ -54,20 +53,13 @@ def _check_existing_data(restaurant_id: int) -> dict:
         has_step2 = bool(ingredient_ids and session.query(USDAPrice).filter(
             USDAPrice.ingredient_id.in_(ingredient_ids)
         ).first())
-
-        # Step 3: any distributors exist
         has_step3 = session.query(Distributor).first() is not None
-
-        # Step 4: any distributor with rfp_status != pending
         has_step4 = session.query(Distributor).filter(
             Distributor.rfp_status != "pending"
         ).first() is not None
-
-        # Step 5: any quoted prices
         has_step5 = session.query(DistributorIngredient).filter(
             DistributorIngredient.quoted_price.isnot(None)
         ).first() is not None
-
         return {"step2": has_step2, "step3": has_step3, "step4": has_step4, "step5": has_step5}
     finally:
         session.close()
@@ -98,9 +90,9 @@ existing = st.session_state.get("existing_data", {})
 # ── Step 1: Menu -> Recipes ──────────────────────────────────────────────────
 
 st.header("Step 1: Menu -> Recipes & Ingredients")
-st.markdown("Upload a menu photo or paste menu text, or select an existing restaurant from the database.")
+st.markdown("Upload a menu photo or select an existing restaurant from the database.")
 
-input_tab1, input_tab2, input_tab3 = st.tabs(["Upload Photo", "Paste Text", "Use Existing"])
+input_tab1, input_tab2 = st.tabs(["Upload Photo", "Use Existing"])
 
 menu_image_path = None
 with input_tab1:
@@ -113,15 +105,7 @@ with input_tab1:
             menu_image_path = tmp.name
         st.image(uploaded_file, caption="Uploaded menu", use_container_width=True)
 
-menu_text = ""
 with input_tab2:
-    menu_text = st.text_area(
-        "Paste restaurant menu here",
-        height=200,
-        placeholder="STARTERS\nCrispy Calamari - Lightly breaded, served with marinara - $12\n...",
-    )
-
-with input_tab3:
     session = SessionLocal()
     try:
         existing_restaurants = session.query(Restaurant).all()
@@ -134,13 +118,12 @@ with input_tab3:
         if st.button("Load Restaurant"):
             ps["restaurant_id"] = options[selected]
             ps["step1_done"] = True
-            existing = _check_existing_data(options[selected])
-            st.session_state.existing_data = existing
+            st.session_state.existing_data = _check_existing_data(options[selected])
             st.rerun()
     else:
         st.info("No restaurants in database yet. Parse a menu first.")
 
-has_input = bool(menu_text) or menu_image_path is not None
+has_input = menu_image_path is not None
 
 if st.button("Parse Menu", disabled=not has_input):
     with st.spinner("Parsing menu into structured recipes..."):
@@ -164,12 +147,22 @@ if ps["step1_done"]:
     session = SessionLocal()
     try:
         recipes = session.query(Recipe).filter_by(restaurant_id=ps["restaurant_id"]).all()
+        # Batch load all ingredients for all recipes
+        recipe_ids = [r.id for r in recipes]
+        all_ris = session.query(RecipeIngredient).filter(
+            RecipeIngredient.recipe_id.in_(recipe_ids)
+        ).all()
+        ing_ids = {ri.ingredient_id for ri in all_ris}
+        ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+            Ingredient.id.in_(ing_ids)
+        ).all()}
+
         for recipe in recipes:
             with st.expander(f"{recipe.dish_name} ({recipe.category})"):
-                ings = session.query(RecipeIngredient).filter_by(recipe_id=recipe.id).all()
+                ris = [ri for ri in all_ris if ri.recipe_id == recipe.id]
                 rows = []
-                for ri in ings:
-                    ing = session.query(Ingredient).get(ri.ingredient_id)
+                for ri in ris:
+                    ing = ingredients_map[ri.ingredient_id]
                     rows.append({
                         "Ingredient": ing.name,
                         "Quantity": ri.quantity,
@@ -216,10 +209,13 @@ if ps["step2_done"]:
     session = SessionLocal()
     try:
         records = session.query(USDAPrice).all()
+        ing_ids = {r.ingredient_id for r in records}
+        ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+            Ingredient.id.in_(ing_ids)
+        ).all()}
         rows = []
         for r in records:
-            ing = session.query(Ingredient).get(r.ingredient_id)
-            # Parse trend info from source string
+            ing = ingredients_map[r.ingredient_id]
             source_parts = r.source.split(" | ")
             trend_info = source_parts[-1] if len(source_parts) > 1 else ""
             rows.append({
@@ -227,7 +223,7 @@ if ps["step2_done"]:
                 "BLS Match": r.usda_item_name,
                 "Price": f"${r.price:.2f}" if r.price else "N/A",
                 "Unit": r.unit or "N/A",
-                "Period": r.date or "N/A",
+                "Period": r.date.strftime("%B %Y") if r.date else "N/A",
                 "Trend": trend_info,
             })
         if rows:
@@ -272,8 +268,16 @@ if ps["step3_done"]:
     session = SessionLocal()
     try:
         distributors = session.query(Distributor).all()
+        # Batch load all ingredient links and ingredients
+        dist_ids = [d.id for d in distributors]
+        all_links = session.query(DistributorIngredient).filter(
+            DistributorIngredient.distributor_id.in_(dist_ids)
+        ).all()
+        link_ing_ids = {l.ingredient_id for l in all_links}
+        ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+            Ingredient.id.in_(link_ing_ids)
+        ).all()} if link_ing_ids else {}
 
-        # Split into contactable vs phone-only
         contactable = [d for d in distributors if d.email]
         phone_only = [d for d in distributors if not d.email]
 
@@ -298,13 +302,8 @@ if ps["step3_done"]:
                 st.write(f"**Website:** {dist.website or 'N/A'}")
                 st.write(f"**Source:** {dist.source}")
 
-                links = session.query(DistributorIngredient).filter_by(
-                    distributor_id=dist.id
-                ).all()
-                ing_names = []
-                for link in links:
-                    ing = session.query(Ingredient).get(link.ingredient_id)
-                    ing_names.append(ing.name)
+                links = [l for l in all_links if l.distributor_id == dist.id]
+                ing_names = [ingredients_map[l.ingredient_id].name for l in links if l.ingredient_id in ingredients_map]
                 if ing_names:
                     st.write(f"**Possible Supplies:** {', '.join(ing_names)}")
 
@@ -362,12 +361,20 @@ if ps["step4_done"]:
         distributors = session.query(Distributor).filter(
             Distributor.rfp_status != "pending"
         ).all()
+        # Batch load ingredient links and names
+        dist_ids = [d.id for d in distributors]
+        all_links = session.query(DistributorIngredient).filter(
+            DistributorIngredient.distributor_id.in_(dist_ids)
+        ).all()
+        link_ing_ids = {l.ingredient_id for l in all_links}
+        ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+            Ingredient.id.in_(link_ing_ids)
+        ).all()} if link_ing_ids else {}
+
         for dist in distributors:
             with st.expander(f"[{dist.rfp_status}] {dist.name}"):
-                ing_links = session.query(DistributorIngredient).filter_by(
-                    distributor_id=dist.id
-                ).all()
-                ing_names = [session.query(Ingredient).get(l.ingredient_id).name for l in ing_links]
+                links = [l for l in all_links if l.distributor_id == dist.id]
+                ing_names = [ingredients_map[l.ingredient_id].name for l in links if l.ingredient_id in ingredients_map]
                 st.write(f"**Ingredients requested:** {', '.join(ing_names)}")
                 if dist.rfp_sent_at:
                     st.write(f"**Sent:** {dist.rfp_sent_at.strftime('%Y-%m-%d %H:%M')}")
@@ -410,13 +417,25 @@ if ps["step5_done"]:
         ).all()
 
         if quoted:
+            # Batch load distributors, ingredients, and BLS prices
+            dist_ids = {l.distributor_id for l in quoted}
+            ing_ids = {l.ingredient_id for l in quoted}
+            distributors_map = {d.id: d for d in session.query(Distributor).filter(
+                Distributor.id.in_(dist_ids)
+            ).all()}
+            ingredients_map = {i.id: i for i in session.query(Ingredient).filter(
+                Ingredient.id.in_(ing_ids)
+            ).all()}
+            bls_map = {b.ingredient_id: b for b in session.query(USDAPrice).filter(
+                USDAPrice.ingredient_id.in_(ing_ids)
+            ).all()}
+
             comparison = []
             for link in quoted:
-                dist = session.query(Distributor).get(link.distributor_id)
-                ing = session.query(Ingredient).get(link.ingredient_id)
+                dist = distributors_map[link.distributor_id]
+                ing = ingredients_map[link.ingredient_id]
+                bls = bls_map.get(link.ingredient_id)
 
-                # BLS market comparison
-                bls = session.query(USDAPrice).filter_by(ingredient_id=link.ingredient_id).first()
                 if bls and bls.price and link.quoted_price:
                     bls_str = f"${bls.price:.2f}/{bls.unit or 'unit'}"
                     diff_pct = ((link.quoted_price - bls.price) / bls.price) * 100
@@ -450,24 +469,52 @@ if ps["step5_done"]:
             st.subheader("Best Prices")
             seen = {}
             for link in quoted:
-                ing = session.query(Ingredient).get(link.ingredient_id)
+                ing = ingredients_map[link.ingredient_id]
                 if ing.name not in seen or (link.quoted_price and link.quoted_price < seen[ing.name][1]):
-                    dist = session.query(Distributor).get(link.distributor_id)
-                    seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit)
-            for ing_name, (dist_name, price, unit) in seen.items():
-                st.write(f"**{ing_name}:** {dist_name} — ${price:.2f}/{unit or 'unit'}")
+                    dist = distributors_map[link.distributor_id]
+                    seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit, link.ingredient_id)
+            best_rows = []
+            for ing_name, (dist_name, price, unit, ing_id) in seen.items():
+                bls = bls_map.get(ing_id)
+                row = {
+                    "Ingredient": ing_name,
+                    "Best Distributor": dist_name,
+                    "Quoted Price": f"${price:.2f}/{unit or 'unit'}",
+                    "BLS Avg (Retail)": "N/A",
+                    "vs Market": "",
+                }
+                if bls and bls.price:
+                    row["BLS Avg (Retail)"] = f"${bls.price:.2f}/{bls.unit or 'unit'}"
+                    diff_pct = ((price - bls.price) / bls.price) * 100
+                    if diff_pct > 20:
+                        row["vs Market"] = f"+{diff_pct:.0f}%"
+                    elif diff_pct < -10:
+                        row["vs Market"] = f"{diff_pct:.0f}%"
+                    else:
+                        row["vs Market"] = "~ retail"
+                best_rows.append(row)
+            st.dataframe(best_rows, use_container_width=True)
 
             # Items not supplied
             not_supplied = session.query(DistributorIngredient).filter_by(
                 supply_status="does_not_supply"
             ).all()
             if not_supplied:
+                ns_dist_ids = {l.distributor_id for l in not_supplied}
+                ns_ing_ids = {l.ingredient_id for l in not_supplied}
+                ns_dists = {d.id: d for d in session.query(Distributor).filter(
+                    Distributor.id.in_(ns_dist_ids)
+                ).all()}
+                ns_ings = {i.id: i for i in session.query(Ingredient).filter(
+                    Ingredient.id.in_(ns_ing_ids)
+                ).all()}
                 st.subheader("Items Not Supplied")
                 omitted_data = []
                 for link in not_supplied:
-                    dist = session.query(Distributor).get(link.distributor_id)
-                    ing = session.query(Ingredient).get(link.ingredient_id)
-                    omitted_data.append({"Distributor": dist.name, "Ingredient": ing.name})
+                    omitted_data.append({
+                        "Distributor": ns_dists[link.distributor_id].name,
+                        "Ingredient": ns_ings[link.ingredient_id].name,
+                    })
                 st.table(omitted_data)
 
             # Distributors needing clarification
@@ -475,12 +522,20 @@ if ps["step5_done"]:
                 rfp_status="needs_clarification"
             ).all()
             if needs_clar:
+                clar_dist_ids = [d.id for d in needs_clar]
+                clar_links = session.query(DistributorIngredient).filter(
+                    DistributorIngredient.distributor_id.in_(clar_dist_ids),
+                    DistributorIngredient.supply_status == "unconfirmed",
+                ).all()
+                clar_ing_ids = {l.ingredient_id for l in clar_links}
+                clar_ings = {i.id: i for i in session.query(Ingredient).filter(
+                    Ingredient.id.in_(clar_ing_ids)
+                ).all()} if clar_ing_ids else {}
+
                 st.subheader("Awaiting Clarification")
                 for d in needs_clar:
-                    unquoted = session.query(DistributorIngredient).filter_by(
-                        distributor_id=d.id, supply_status="unconfirmed"
-                    ).all()
-                    names = [session.query(Ingredient).get(l.ingredient_id).name for l in unquoted]
+                    links = [l for l in clar_links if l.distributor_id == d.id]
+                    names = [clar_ings[l.ingredient_id].name for l in links if l.ingredient_id in clar_ings]
                     st.write(f"**{d.name}:** missing {', '.join(names)}")
         else:
             st.info("No quotes received yet. Distributors may not have replied.")

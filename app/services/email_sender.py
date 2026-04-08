@@ -15,8 +15,8 @@ from googleapiclient.discovery import build
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Distributor, DistributorIngredient, Ingredient, Restaurant,
-    USDAPrice,
+    Distributor, DistributorIngredient, Ingredient, Recipe,
+    RecipeIngredient, Restaurant, USDAPrice,
 )
 
 SCOPES = [
@@ -56,19 +56,22 @@ def get_gmail_service():
 def compose_rfp_body(
     restaurant: Restaurant,
     distributor: Distributor,
-    ingredients_with_info: list[tuple[Ingredient, str | None, str]],
+    ingredients_with_info: list[tuple],
     quote_deadline_days: int = 7,
 ) -> tuple[str, str]:
     """
     Compose an RFP email subject + body.
-    ingredients_with_info: list of (Ingredient, usda_match_name, unit)
+    ingredients_with_info: list of (Ingredient, usda_match_name, unit, quantity, qty_unit)
     """
     deadline = datetime.now(timezone.utc) + timedelta(days=quote_deadline_days)
     deadline_str = deadline.strftime("%B %d, %Y")
 
     lines = []
-    for ing, usda_name, unit in ingredients_with_info:
-        lines.append(f"  - {ing.name}")
+    for ing, usda_name, unit, qty, qty_unit in ingredients_with_info:
+        if qty:
+            lines.append(f"  - {ing.name} — est. {qty:.0f} {qty_unit}")
+        else:
+            lines.append(f"  - {ing.name}")
 
     ingredient_list = "\n".join(lines)
 
@@ -233,9 +236,8 @@ Map ALL fillable fields, using empty string for fields you can't match."""
             messages=[{"role": "user", "content": prompt}],
         )
         import json
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        from app.utils import strip_json_fences
+        raw = strip_json_fences(response.content[0].text)
         mappings = json.loads(raw)
 
         # Substitute "message" placeholder with actual body
@@ -251,6 +253,82 @@ Map ALL fillable fields, using empty string for fields you can't match."""
         return {}
 
 
+def _score_forms(forms: list) -> int:
+    """Score HTML forms and return index of the most likely contact form."""
+    best_idx = 0
+    best_score = -1
+    for idx, f in enumerate(forms):
+        score = 0
+        if f.find("textarea"):
+            score += 5
+        for inp in f.find_all("input"):
+            name = (inp.get("name") or "").lower()
+            typ = (inp.get("type") or "").lower()
+            if "email" in name or typ == "email":
+                score += 3
+            if "name" in name:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+    return best_idx
+
+
+def _fill_and_report(browser, forms, form_idx, sender_email, rfp_body, submit, use_claude_only=False):
+    """Fill a form, print field report, optionally submit. Returns True on success."""
+    browser.select_form(forms[form_idx])
+    form = browser.get_current_form()
+
+    fillable = [
+        el for el in form.form.find_all(["input", "textarea"])
+        if (el.get("type") or "").lower() not in ("hidden", "submit", "button")
+        and el.get("name")
+    ]
+    fillable_names = [el.get("name") for el in fillable]
+
+    if use_claude_only:
+        filled = {}
+    else:
+        filled = _fill_form_by_patterns(form, sender_email, rfp_body)
+
+    if len(filled) < len(fillable) // 2:
+        label = "Claude-only" if use_claude_only else "Pattern matching"
+        if not use_claude_only:
+            print(f"    {label} only filled {len(filled)}/{len(fillable)} fields, trying Claude...")
+        form_html = str(forms[form_idx])
+        if len(form_html) > 8000:
+            form_html = form_html[:8000] + "... (truncated)"
+
+        mappings = _fill_form_with_claude(form_html, sender_email, rfp_body)
+        if mappings:
+            for field_name, value in mappings.items():
+                try:
+                    form[field_name] = value
+                    filled[field_name] = value
+                except Exception:
+                    pass
+            print(f"    Claude mapped {len(mappings)} fields")
+        elif use_claude_only:
+            print("    Claude couldn't map the form")
+            return False
+
+    print(f"    --- Form Fields ({len(filled)}/{len(fillable)} filled) ---")
+    for name in fillable_names:
+        if name in filled:
+            print(f"      ✓ {name} = {filled[name]!r}")
+        else:
+            print(f"      ✗ {name} = (unfilled)")
+    print("    ---")
+
+    if not submit:
+        print(f"    [DRY RUN] Form filled but NOT submitted")
+        return True
+
+    browser.submit_selected()
+    print(f"    Form submitted")
+    return True
+
+
 def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit: bool = True) -> bool:
     """Attempt to fill a website contact form.
 
@@ -258,154 +336,27 @@ def _submit_contact_form(form_url: str, rfp_body: str, sender_email: str, submit
     Strategy: pattern matching first, Claude fallback if that fails.
     """
     try:
-        browser = mechanicalsoup.StatefulBrowser(
-            user_agent="Mozilla/5.0",
-            raise_on_404=True,
-        )
+        browser = mechanicalsoup.StatefulBrowser(user_agent="Mozilla/5.0", raise_on_404=True)
         browser.open(form_url)
         forms = browser.get_current_page().find_all("form")
         if not forms:
             print(f"    No form found at {form_url}")
             return False
 
-        # Score forms to find the most likely contact form (vs a search bar)
-        best_idx = 0
-        best_score = -1
-        for idx, f in enumerate(forms):
-            score = 0
-            if f.find("textarea"):
-                score += 5
-            for inp in f.find_all("input"):
-                name = (inp.get("name") or "").lower()
-                typ = (inp.get("type") or "").lower()
-                if "email" in name or typ == "email":
-                    score += 3
-                if "name" in name:
-                    score += 1
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        # Select the highest-scoring form
-        browser.select_form(forms[best_idx])
-        form = browser.get_current_form()
-
-        # Count fillable fields (excluding hidden/submit)
-        fillable = [
-            el for el in form.form.find_all(["input", "textarea"])
-            if (el.get("type") or "").lower() not in ("hidden", "submit", "button")
-            and el.get("name")
-        ]
-        fillable_names = [el.get("name") for el in fillable]
-
-        # Try pattern matching first
-        filled = _fill_form_by_patterns(form, sender_email, rfp_body)
-
-        if len(filled) < len(fillable) // 2:
-            # Pattern matching got less than half the fields — ask Claude
-            print(f"    Pattern matching only filled {len(filled)}/{len(fillable)} fields, trying Claude...")
-            form_html = str(forms[0])
-            if len(form_html) > 8000:
-                form_html = form_html[:8000] + "... (truncated)"
-
-            mappings = _fill_form_with_claude(form_html, sender_email, rfp_body)
-            if mappings:
-                for field_name, value in mappings.items():
-                    try:
-                        form[field_name] = value
-                        filled[field_name] = value
-                    except Exception:
-                        pass
-                print(f"    Claude mapped {len(mappings)} fields")
-
-        # Print detailed field report
-        print(f"    --- Form Fields ({len(filled)}/{len(fillable)} filled) ---")
-        for name in fillable_names:
-            if name in filled:
-                val = filled[name]
-                print(f"      ✓ {name} = {val!r}")
-            else:
-                print(f"      ✗ {name} = (unfilled)")
-        print("    ---")
-
-        if not submit:
-            print(f"    [DRY RUN] Form filled but NOT submitted at {form_url}")
-            return True
-
-        browser.submit_selected()
-        print(f"    Form submitted at {form_url}")
-        return True
+        best_idx = _score_forms(forms)
+        return _fill_and_report(browser, forms, best_idx, sender_email, rfp_body, submit)
 
     except Exception as e:
         print(f"    Pattern fill failed: {e}")
         try:
             print("    Retrying with Claude form analysis...")
-            browser2 = mechanicalsoup.StatefulBrowser(
-                user_agent="Mozilla/5.0",
-                raise_on_404=True,
-            )
+            browser2 = mechanicalsoup.StatefulBrowser(user_agent="Mozilla/5.0", raise_on_404=True)
             browser2.open(form_url)
-            page_forms = browser2.get_current_page().find_all("form")
-            if not page_forms:
+            forms2 = browser2.get_current_page().find_all("form")
+            if not forms2:
                 return False
-
-            best_idx = 0
-            best_score = -1
-            for idx, f in enumerate(page_forms):
-                score = 0
-                if f.find("textarea"):
-                    score += 5
-                for inp in f.find_all("input"):
-                    name = (inp.get("name") or "").lower()
-                    typ = (inp.get("type") or "").lower()
-                    if "email" in name or typ == "email":
-                        score += 3
-                    if "name" in name:
-                        score += 1
-                if score > best_score:
-                    best_score = score
-                    best_idx = idx
-
-            form_html = str(page_forms[best_idx])
-            if len(form_html) > 8000:
-                form_html = form_html[:8000] + "... (truncated)"
-
-            mappings = _fill_form_with_claude(form_html, sender_email, rfp_body)
-            if not mappings:
-                print("    Claude couldn't map the form either")
-                return False
-
-            browser2.select_form(page_forms[best_idx])
-            form2 = browser2.get_current_form()
-            
-            fillable = [
-                el for el in form2.form.find_all(["input", "textarea"])
-                if (el.get("type") or "").lower() not in ("hidden", "submit", "button")
-                and el.get("name")
-            ]
-            fillable_names = [el.get("name") for el in fillable]
-
-            for field_name, value in mappings.items():
-                try:
-                    form2[field_name] = value
-                except Exception:
-                    pass
-
-            print(f"    --- Form Fields ({len(mappings)}/{len(fillable)} filled) ---")
-            for name in fillable_names:
-                if name in mappings:
-                    print(f"      ✓ {name} = {mappings[name]!r}")
-                else:
-                    print(f"      ✗ {name} = (unfilled)")
-            print("    ---")
-
-            if not submit:
-                print(f"    [DRY RUN] Form filled via Claude but NOT submitted at {form_url}")
-                return True
-
-            browser2.submit_selected()
-            print(f"    Form submitted via Claude fallback at {form_url}")
-            return True
+            best_idx = _score_forms(forms2)
+            return _fill_and_report(browser2, forms2, best_idx, sender_email, rfp_body, submit, use_claude_only=True)
         except Exception as e2:
             print(f"    Claude fallback also failed: {e2}")
             return False
@@ -418,24 +369,50 @@ def _make_yopmail(distributor_name: str) -> str:
 
 
 def _get_ingredients_for_distributor(
-    session: Session, dist: Distributor,
-) -> list[tuple[Ingredient, str | None, str]]:
-    """Get linked ingredients with USDA reference data for a distributor."""
+    session: Session, dist: Distributor, restaurant_id: int,
+) -> list[tuple]:
+    """Get linked ingredients with USDA reference data and aggregated quantities.
+
+    Returns list of (Ingredient, usda_match_name, unit, total_qty, qty_unit).
+    """
     links = session.query(DistributorIngredient).filter_by(
         distributor_id=dist.id
     ).all()
+    ing_ids = [l.ingredient_id for l in links]
+    if not ing_ids:
+        return []
 
-    ingredients_with_info = []
-    for link in links:
-        ing = session.query(Ingredient).get(link.ingredient_id)
-        usda_rec = session.query(USDAPrice).filter_by(
-            ingredient_id=ing.id
-        ).first()
+    ingredients = {i.id: i for i in session.query(Ingredient).filter(
+        Ingredient.id.in_(ing_ids)
+    ).all()}
+
+    # Aggregate quantities: per-serving qty × estimated_servings, summed across recipes
+    recipe_ings = session.query(RecipeIngredient, Recipe.estimated_servings).join(Recipe).filter(
+        Recipe.restaurant_id == restaurant_id,
+        RecipeIngredient.ingredient_id.in_(ing_ids),
+    ).all()
+    qty_map = {}
+    for ri, servings in recipe_ings:
+        multiplier = servings or 1
+        if ri.ingredient_id not in qty_map:
+            qty_map[ri.ingredient_id] = (0.0, ri.unit)
+        total, unit = qty_map[ri.ingredient_id]
+        qty_map[ri.ingredient_id] = (total + ri.quantity * multiplier, unit)
+
+    usda_map = {u.ingredient_id: u for u in session.query(USDAPrice).filter(
+        USDAPrice.ingredient_id.in_(ing_ids)
+    ).all()}
+
+    result = []
+    for ing_id in ing_ids:
+        ing = ingredients[ing_id]
+        usda_rec = usda_map.get(ing_id)
         usda_name = usda_rec.usda_item_name if usda_rec else None
         unit = ing.base_unit or "lb"
-        ingredients_with_info.append((ing, usda_name, unit))
+        qty, qty_unit = qty_map.get(ing_id, (None, unit))
+        result.append((ing, usda_name, unit, qty, qty_unit))
 
-    return ingredients_with_info
+    return result
 
 
 def send_rfp_emails(
@@ -454,7 +431,7 @@ def send_rfp_emails(
     If mock_recipient is set, all emails go to yopmail addresses instead.
     If submit_forms is False, forms are filled and verified but not actually submitted.
     """
-    restaurant = session.query(Restaurant).get(restaurant_id)
+    restaurant = session.get(Restaurant, restaurant_id)
     if not restaurant:
         print(f"Restaurant {restaurant_id} not found.")
         return []
@@ -476,7 +453,7 @@ def send_rfp_emails(
     skipped_count = 0
 
     for dist in distributors:
-        ingredients_with_info = _get_ingredients_for_distributor(session, dist)
+        ingredients_with_info = _get_ingredients_for_distributor(session, dist, restaurant_id)
         if not ingredients_with_info:
             continue
 

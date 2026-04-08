@@ -17,16 +17,7 @@ def init_db():
     """Create all tables."""
     from app.models import (  # noqa: F401 — import to register models
         Restaurant, Recipe, Ingredient, RecipeIngredient,
-        USDAPrice,
+        BLSCache, USDAPrice,
         Distributor, DistributorIngredient,
     )
     Base.metadata.create_all(ENGINE)
-
-
-def get_session():
-    """Yield a database session."""
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()

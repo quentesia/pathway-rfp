@@ -88,11 +88,8 @@ def search_llm_fallback(location: str, categories: list[str]) -> list[dict]:
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1]
-            text = text.rsplit("```", 1)[0]
-            
+        from app.utils import strip_json_fences
+        text = strip_json_fences(response.content[0].text)
         parsed = DistributorList.model_validate_json(text)
         distributors = []
         for d in parsed.distributors:
@@ -249,9 +246,8 @@ def find_distributors(location: str, categories: list[str]) -> list[dict]:
             return final_list
         print("  No Serper results.")
 
-    # print("  Using LLM inference fallback...")
-    # return search_llm_fallback(location, categories)
-    return []
+    print("  Using LLM inference fallback...")
+    return search_llm_fallback(location, categories)
 
 
 def store_distributors(
@@ -335,6 +331,15 @@ def store_distributors(
     return processed
 
 
+class EmailLookupItem(BaseModel):
+    name: str = Field(description="Distributor name")
+    email: str | None = Field(None, description="Contact email, null if unknown")
+
+
+class EmailLookupResult(BaseModel):
+    results: list[EmailLookupItem]
+
+
 def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> None:
     """Use Claude to infer emails for distributors that have a website but no email."""
     missing = [d for d in distributors if d.website and not d.email]
@@ -347,11 +352,12 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
     for i, d in enumerate(missing, 1):
         lines.append(f"{i}. {d.name} | {d.location} | {d.website}")
 
+    schema_json = json.dumps(EmailLookupResult.model_json_schema(), indent=2)
     prompt = (
         "Given these food distributors (name, location, website), "
-        "reply with ONLY their contact email, one per line, in the same order. "
-        "If you cannot determine the email, write NULL.\n\n"
+        "find their contact email addresses. Return null for any you cannot determine.\n\n"
         + "\n".join(lines)
+        + f"\n\nReturn ONLY valid JSON matching this schema:\n{schema_json}"
     )
 
     try:
@@ -361,12 +367,13 @@ def _ai_email_fallback(session: Session, distributors: list[Distributor]) -> Non
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        result_lines = response.content[0].text.strip().splitlines()
+        from app.utils import strip_json_fences
+        text = strip_json_fences(response.content[0].text)
+        parsed = EmailLookupResult.model_validate_json(text)
 
-        for dist, line in zip(missing, result_lines):
-            email = line.strip()
-            if email and email.upper() != "NULL":
-                dist.email = email.lower()
+        for dist, result in zip(missing, parsed.results):
+            if result.email:
+                dist.email = result.email.lower()
                 print(f"    AI found: {dist.name} → {dist.email}")
             else:
                 print(f"    AI: {dist.name} → not found")
