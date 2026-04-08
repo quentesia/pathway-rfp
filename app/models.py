@@ -23,11 +23,8 @@ class Restaurant(Base):
     menu_source_url = Column(String)
     menu_hash = Column(String, index=True)
     created_at = Column(Date, default=_today)
-    
-    rfp_emails = relationship("RFPEmail", back_populates="restaurant")
 
     recipes = relationship("Recipe", back_populates="restaurant")
-    # rfp_emails = relationship("RFPEmail", back_populates="restaurant")
 
 
 class Recipe(Base):
@@ -108,8 +105,10 @@ class Distributor(Base):
     source = Column(String)  # Google, SerpAPI, Claude
     categories_served = Column(String)
 
+    rfp_status = Column(String, default="pending")  # pending, sent, completed, needs_clarification
+    rfp_sent_at = Column(DateTime)
+
     ingredient_links = relationship("DistributorIngredient", back_populates="distributor")
-    rfp_emails = relationship("RFPEmail", back_populates="distributor")
 
 
 class DistributorIngredient(Base):
@@ -118,40 +117,10 @@ class DistributorIngredient(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
     ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
+    supply_status = Column(String, default="unconfirmed")  # unconfirmed, confirmed, does_not_supply
+    quoted_price = Column(Float)
+    quoted_unit = Column(String)
+    delivery_terms = Column(String)
 
     distributor = relationship("Distributor", back_populates="ingredient_links")
     ingredient = relationship("Ingredient", back_populates="distributor_links")
-
-
-# ── RFP (Steps 4-5) ─────────────────────────────────────────────────────────
-
-class RFPEmail(Base):
-    __tablename__ = "rfp_emails"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"), nullable=False)
-    subject = Column(String, nullable=False)
-    body = Column(Text, nullable=False)
-    sent_at = Column(DateTime)
-    status = Column(String, default="draft")
-
-    distributor = relationship("Distributor", back_populates="rfp_emails")
-    restaurant = relationship("Restaurant", back_populates="rfp_emails")
-    quotes = relationship("RFPQuote", back_populates="rfp_email")
-
-
-class RFPQuote(Base):
-    __tablename__ = "rfp_quotes"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    rfp_email_id = Column(Integer, ForeignKey("rfp_emails.id"), nullable=False)
-    distributor_id = Column(Integer, ForeignKey("distributors.id"), nullable=False)
-    ingredient_id = Column(Integer, ForeignKey("ingredients.id"), nullable=False)
-    quoted_price = Column(Float)
-    unit = Column(String)
-    delivery_terms = Column(String)
-    raw_text = Column(Text)
-
-    rfp_email = relationship("RFPEmail", back_populates="quotes")
-    distributor = relationship("Distributor")
-    ingredient = relationship("Ingredient")

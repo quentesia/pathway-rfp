@@ -12,7 +12,6 @@ from app.db import init_db, SessionLocal
 from app.models import (
     Recipe, Ingredient, RecipeIngredient,
     USDAPrice, Distributor, DistributorIngredient,
-    RFPEmail, RFPQuote,
 )
 from app.services.menu_parser import parse_menu
 from app.services.usda_client import fetch_market_trends
@@ -239,33 +238,37 @@ if st.button("Send Emails", disabled=not ps["step3_done"]):
     with st.spinner("Sending RFP emails..."):
         session = SessionLocal()
         try:
-            emails = send_rfp_emails(
+            processed = send_rfp_emails(
                 session, ps["restaurant_id"], mock_recipient="demo"
             )
             ps["step4_done"] = True
-            sent = sum(1 for e in emails if e.status == "sent")
-            forms = sum(1 for e in emails if e.status == "form_submitted")
-            skipped = sum(1 for e in emails if e.status == "skipped")
+            sent = sum(1 for d in processed if d.rfp_status == "sent")
+            forms = sum(1 for d in processed if d.rfp_status == "form_ready")
+            skipped = sum(1 for d in processed if d.rfp_status == "skipped")
             parts = [f"{sent} emailed"]
             if forms:
-                parts.append(f"{forms} forms submitted")
+                parts.append(f"{forms} forms ready")
             if skipped:
                 parts.append(f"{skipped} skipped (phone only)")
-            st.success(f"RFP outreach: {' — '.join(parts)} out of {len(emails)} distributors")
+            st.success(f"RFP outreach: {' — '.join(parts)} out of {len(processed)} distributors")
         finally:
             session.close()
 
 if ps["step4_done"]:
     session = SessionLocal()
     try:
-        emails = session.query(RFPEmail).filter_by(
-            restaurant_id=ps["restaurant_id"]
+        distributors = session.query(Distributor).filter(
+            Distributor.rfp_status != "pending"
         ).all()
-        for email in emails:
-            dist = session.query(Distributor).get(email.distributor_id)
-            with st.expander(f"[{email.status}] To: {dist.name}"):
-                st.write(f"**Subject:** {email.subject}")
-                st.code(email.body, language=None)
+        for dist in distributors:
+            with st.expander(f"[{dist.rfp_status}] {dist.name}"):
+                ing_links = session.query(DistributorIngredient).filter_by(
+                    distributor_id=dist.id
+                ).all()
+                ing_names = [session.query(Ingredient).get(l.ingredient_id).name for l in ing_links]
+                st.write(f"**Ingredients requested:** {', '.join(ing_names)}")
+                if dist.rfp_sent_at:
+                    st.write(f"**Sent:** {dist.rfp_sent_at.strftime('%Y-%m-%d %H:%M')}")
     finally:
         session.close()
 
@@ -278,35 +281,93 @@ if st.button("Check Inbox", disabled=not ps["step4_done"]):
     with st.spinner("Monitoring inbox for replies..."):
         session = SessionLocal()
         try:
-            quotes = collect_quotes(session, ps["restaurant_id"])
+            updated = collect_quotes(session, ps["restaurant_id"], mock_recipient="demo")
             ps["step5_done"] = True
-            st.success(f"Parsed {len(quotes)} quotes from replies!")
+            st.success(f"Updated prices for {len(updated)} ingredients!")
         finally:
             session.close()
 
 if ps["step5_done"]:
     session = SessionLocal()
     try:
-        quotes = session.query(RFPQuote).all()
-        if quotes:
+        # Get all quoted ingredients
+        quoted = session.query(DistributorIngredient).filter(
+            DistributorIngredient.quoted_price.isnot(None)
+        ).all()
+
+        if quoted:
             comparison = []
-            for q in quotes:
-                dist = session.query(Distributor).get(q.distributor_id)
-                ing = session.query(Ingredient).get(q.ingredient_id)
+            for link in quoted:
+                dist = session.query(Distributor).get(link.distributor_id)
+                ing = session.query(Ingredient).get(link.ingredient_id)
+
+                # BLS market comparison
+                bls = session.query(USDAPrice).filter_by(ingredient_id=link.ingredient_id).first()
+                if bls and bls.price and link.quoted_price:
+                    bls_str = f"${bls.price:.2f}/{bls.unit or 'unit'}"
+                    diff_pct = ((link.quoted_price - bls.price) / bls.price) * 100
+                    if diff_pct > 20:
+                        flag = f"+{diff_pct:.0f}% vs retail"
+                    elif diff_pct < -10:
+                        flag = f"{diff_pct:.0f}% below retail"
+                    else:
+                        flag = "~ near retail"
+                    trend = ""
+                    if bls.source and " | " in bls.source:
+                        trend = bls.source.split(" | ")[-1]
+                else:
+                    bls_str = "N/A"
+                    flag = ""
+                    trend = ""
+
                 comparison.append({
                     "Distributor": dist.name,
                     "Ingredient": ing.name,
-                    "Quoted Price": f"${q.quoted_price:.2f}" if q.quoted_price else "N/A",
-                    "Unit": q.unit or "N/A",
-                    "Delivery Terms": q.delivery_terms or "N/A",
+                    "Quoted Price": f"${link.quoted_price:.2f}",
+                    "Unit": link.quoted_unit or "N/A",
+                    "BLS Avg (Retail)": bls_str,
+                    "vs Market": flag,
+                    "Trend": trend,
+                    "Delivery Terms": link.delivery_terms or "N/A",
                 })
-            st.table(comparison)
+            st.dataframe(comparison, use_container_width=True)
 
-            # Recommendation
-            st.subheader("Recommendation")
-            best = min(quotes, key=lambda q: q.quoted_price or float("inf"))
-            best_dist = session.query(Distributor).get(best.distributor_id)
-            st.success(f"Best overall price: **{best_dist.name}** at ${best.quoted_price:.2f}/{best.unit}")
+            # Best price per ingredient
+            st.subheader("Best Prices")
+            seen = {}
+            for link in quoted:
+                ing = session.query(Ingredient).get(link.ingredient_id)
+                if ing.name not in seen or (link.quoted_price and link.quoted_price < seen[ing.name][1]):
+                    dist = session.query(Distributor).get(link.distributor_id)
+                    seen[ing.name] = (dist.name, link.quoted_price, link.quoted_unit)
+            for ing_name, (dist_name, price, unit) in seen.items():
+                st.write(f"**{ing_name}:** {dist_name} — ${price:.2f}/{unit or 'unit'}")
+
+            # Items not supplied
+            not_supplied = session.query(DistributorIngredient).filter_by(
+                supply_status="does_not_supply"
+            ).all()
+            if not_supplied:
+                st.subheader("Items Not Supplied")
+                omitted_data = []
+                for link in not_supplied:
+                    dist = session.query(Distributor).get(link.distributor_id)
+                    ing = session.query(Ingredient).get(link.ingredient_id)
+                    omitted_data.append({"Distributor": dist.name, "Ingredient": ing.name})
+                st.table(omitted_data)
+
+            # Distributors needing clarification
+            needs_clar = session.query(Distributor).filter_by(
+                rfp_status="needs_clarification"
+            ).all()
+            if needs_clar:
+                st.subheader("Awaiting Clarification")
+                for d in needs_clar:
+                    unquoted = session.query(DistributorIngredient).filter_by(
+                        distributor_id=d.id, supply_status="unconfirmed"
+                    ).all()
+                    names = [session.query(Ingredient).get(l.ingredient_id).name for l in unquoted]
+                    st.write(f"**{d.name}:** missing {', '.join(names)}")
         else:
             st.info("No quotes received yet. Distributors may not have replied.")
     finally:

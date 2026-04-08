@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Distributor, DistributorIngredient, Ingredient, Restaurant,
-    RFPEmail, USDAPrice,
+    USDAPrice,
 )
 
 SCOPES = [
@@ -68,8 +68,7 @@ def compose_rfp_body(
 
     lines = []
     for ing, usda_name, unit in ingredients_with_info:
-        ref = f" (ref: {usda_name})" if usda_name else ""
-        lines.append(f"  - {ing.name}{ref}")
+        lines.append(f"  - {ing.name}")
 
     ingredient_list = "\n".join(lines)
 
@@ -117,33 +116,75 @@ def send_email(service, sender: str, to: str, subject: str, body: str) -> str | 
         return None
 
 
+def _get_field_label(field_el) -> str:
+    """Get the human-readable label for a form field by checking:
+    1. <label for="field_id">
+    2. Parent <label> wrapping the field
+    3. Placeholder attribute
+    4. aria-label attribute
+    5. Fall back to field name
+    """
+    soup = field_el.find_parent("form") or field_el.parent
+    field_id = field_el.get("id")
+
+    # Check <label for="id">
+    if field_id and soup:
+        label = soup.find("label", attrs={"for": field_id})
+        if label:
+            return label.get_text(strip=True).lower()
+
+    # Check parent <label>
+    parent_label = field_el.find_parent("label")
+    if parent_label:
+        return parent_label.get_text(strip=True).lower()
+
+    # Placeholder or aria-label
+    for attr in ("placeholder", "aria-label", "title"):
+        val = field_el.get(attr)
+        if val:
+            return val.lower()
+
+    return (field_el.get("name") or "").lower()
+
+
 def _fill_form_by_patterns(form, sender_email: str, rfp_body: str) -> dict[str, str]:
-    """Fill form fields using common name patterns. Returns {field_name: value} of what was filled."""
+    """Fill form fields using label/name patterns. Returns {field_name: value} of what was filled."""
     filled = {}
     for field_el in form.form.find_all(["input", "textarea", "select"]):
-        name = (field_el.get("name") or "").lower()
+        field_name = field_el.get("name")
         field_type = (field_el.get("type") or "").lower()
 
-        if field_type in ("hidden", "submit", "button") or not field_el.get("name"):
+        if field_type in ("hidden", "submit", "button") or not field_name:
             continue
 
+        # Check both the field name and its label
+        name_lower = field_name.lower()
+        label = _get_field_label(field_el)
+        match_text = f"{name_lower} {label}"
+
         value = None
-        if any(k in name for k in ("email", "mail")):
+        if any(k in match_text for k in ("email", "mail")):
             value = sender_email
-        elif any(k in name for k in ("name", "your-name", "full_name")):
+        elif any(k in match_text for k in ("first name", "your name", "full name", "contact name")):
             value = "Procurement Team"
-        elif any(k in name for k in ("subject", "topic")):
-            value = "Request for Proposal — Ingredient Pricing"
-        elif any(k in name for k in ("message", "body", "comment", "inquiry", "text", "description")):
-            value = rfp_body
-        elif any(k in name for k in ("phone", "tel")):
+        elif "last name" in match_text or "surname" in match_text:
             value = ""
-        elif any(k in name for k in ("company", "organization", "business")):
+        elif any(k in match_text for k in ("subject", "topic", "reason")):
+            value = "Request for Proposal — Ingredient Pricing"
+        elif any(k in match_text for k in ("message", "body", "comment", "inquiry", "question", "description", "details")):
+            value = rfp_body
+        elif any(k in match_text for k in ("phone", "tel", "mobile")):
+            value = ""
+        elif any(k in match_text for k in ("company", "organization", "business", "restaurant")):
             value = "Restaurant Procurement"
+        elif any(k in match_text for k in ("city", "location")):
+            value = ""
+        elif any(k in match_text for k in ("state", "zip", "postal")):
+            value = ""
 
         if value is not None:
-            form[field_el["name"]] = value
-            filled[field_el["name"]] = value
+            form[field_name] = value
+            filled[field_name] = value
 
     return filled
 
@@ -163,20 +204,26 @@ def _fill_form_with_claude(form_html: str, sender_email: str, rfp_body: str) -> 
 
     prompt = f"""Here is a contact form's HTML. Map each fillable field (input/textarea) to the correct value from the data below. Skip hidden, submit, and button fields.
 
+IMPORTANT: Field "name" attributes may be GUIDs or opaque IDs (e.g. "fxb.57c55011...Fields[de0236e9...]").
+Look at <label> elements (for= attribute or wrapping), placeholder text, aria-label, and surrounding context to determine what each field is for.
+Use the EXACT "name" attribute value as the key in your JSON — do not simplify it.
+
 DATA TO FILL:
 - email: {sender_email}
 - name: Procurement Team
 - company: Restaurant Procurement
+- phone: (leave empty string)
 - subject: Request for Proposal — Ingredient Pricing
 - message: (the RFP body text — use the key "message" to represent this)
+- For any other fields (city, state, zip, etc.): use empty string
 
 FORM HTML:
 {form_html}
 
-Reply with ONLY a JSON object mapping field "name" attributes to either the literal value or the key "message" (I'll substitute the full text). Example:
-{{"your-email": "{sender_email}", "field_3": "message", "contact-name": "Procurement Team"}}
+Reply with ONLY a JSON object mapping the EXACT field "name" attributes to either the literal value or the key "message" (I'll substitute the full text). Example:
+{{"fxb.abc123.Fields[def456].Value": "{sender_email}", "fxb.abc123.Fields[ghi789].Value": "message"}}
 
-If a field doesn't map to any of the data, omit it."""
+Map ALL fillable fields, using empty string for fields you can't match."""
 
     try:
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -396,13 +443,13 @@ def send_rfp_emails(
     restaurant_id: int,
     mock_recipient: str | None = None,
     submit_forms: bool = False,
-) -> list[RFPEmail]:
+) -> list[Distributor]:
     """
     Full Step 4 pipeline:
     1. Get restaurant and distributors
     2. Skip phone-only distributors (no email, no form)
     3. Send emails via Gmail or submit contact forms
-    4. Log everything to DB
+    4. Update distributor rfp_status in DB
 
     If mock_recipient is set, all emails go to yopmail addresses instead.
     If submit_forms is False, forms are filled and verified but not actually submitted.
@@ -423,7 +470,7 @@ def send_rfp_emails(
         return []
 
     service = get_gmail_service()
-    rfp_records = []
+    processed = []
     sent_count = 0
     form_count = 0
     skipped_count = 0
@@ -435,53 +482,39 @@ def send_rfp_emails(
 
         subject, body = compose_rfp_body(restaurant, dist, ingredients_with_info)
 
-        # Determine how to contact this distributor
         has_form = dist.email and dist.email.startswith("form:")
         has_email = dist.email and not has_form
-        status = "draft"
-        sent_at = None
 
         if has_email:
-            # Send via Gmail — use yopmail in demo mode
             recipient = _make_yopmail(dist.name) if mock_recipient else dist.email
             print(f"  Emailing {dist.name} ({recipient})...")
             msg_id = send_email(service, sender, recipient, subject, body)
-            status = "sent" if msg_id else "failed"
-            sent_at = datetime.now(timezone.utc) if msg_id else None
             if msg_id:
+                dist.rfp_status = "sent"
+                dist.rfp_sent_at = datetime.now(timezone.utc)
                 sent_count += 1
+            else:
+                dist.rfp_status = "failed"
 
         elif has_form:
-            # Try submitting the contact form
-            form_url = dist.email[5:]  # strip "form:" prefix
+            form_url = dist.email[5:]
             print(f"  Submitting form for {dist.name} ({form_url})...")
             success = _submit_contact_form(form_url, body, sender, submit=submit_forms)
-            if not submit_forms:
-                status = "form_ready" if success else "form_failed"
-            else:
-                status = "form_submitted" if success else "form_failed"
-            sent_at = datetime.now(timezone.utc) if success else None
             if success:
+                dist.rfp_status = "form_ready" if not submit_forms else "sent"
+                dist.rfp_sent_at = datetime.now(timezone.utc)
                 form_count += 1
+            else:
+                dist.rfp_status = "form_failed"
 
         else:
-            # Phone-only — skip
             print(f"  Skipping {dist.name} — phone only")
+            dist.rfp_status = "skipped"
             skipped_count += 1
-            status = "skipped"
 
-        rfp = RFPEmail(
-            distributor_id=dist.id,
-            restaurant_id=restaurant.id,
-            subject=subject,
-            body=body,
-            sent_at=sent_at,
-            status=status,
-        )
-        session.add(rfp)
-        rfp_records.append(rfp)
+        processed.append(dist)
 
     session.commit()
-    total = len(rfp_records)
-    print(f"Step 4 complete: {sent_count} emailed, {form_count} forms submitted, {skipped_count} skipped (phone only) — {total} total")
-    return rfp_records
+    total = len(processed)
+    print(f"Step 4 complete: {sent_count} emailed, {form_count} forms, {skipped_count} skipped (phone only) — {total} total")
+    return processed

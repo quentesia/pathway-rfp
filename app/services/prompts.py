@@ -79,24 +79,22 @@ Ingredient categories needed: {categories}
 """
 
 
-QUOTE_PARSE_PROMPT = """You are a procurement assistant. Parse the following email reply from a food
-distributor into structured quote data.
+def get_quote_parse_prompt(email_body: str, requested_ingredients: str, schema_json: str) -> str:
+    return f"""You are a procurement assistant. Parse the following email reply from a food distributor into structured quote data.
 
-Return ONLY valid JSON:
-{{
-    "quotes": [
-        {{
-            "ingredient_name": "string",
-            "quoted_price": 0.00,
-            "unit": "string (e.g., lb, oz, each, case)",
-            "delivery_terms": "string or null",
-            "notes": "string or null"
-        }}
-    ],
-    "missing_info": ["list of ingredients that are missing quotes or have unclear pricing"],
-    "needs_followup": true
-}}
+We requested quotes for these specific ingredients:
+{requested_ingredients}
 
-Email body:
+RULES:
+- Extract all pricing, units, and delivery notes for any mentioned ingredients.
+- For `clarification_needed`: ONLY include ingredients where the distributor explicitly mentioned they can supply it, BUT forgot the exact price or unit.
+- If the distributor COMPLETELY OMITTED an ingredient from their reply, assume they do NOT supply it. Do NOT put omitted ingredients in `clarification_needed`.
+
+Email body you must parse:
 {email_body}
-"""
+
+Your response MUST be valid JSON conforming to this exact schema:
+
+{schema_json}
+
+Return ONLY the JSON. No markdown fences, no commentary."""

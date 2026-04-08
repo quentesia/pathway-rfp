@@ -2,39 +2,33 @@
 from dotenv import load_dotenv
 from app.db import init_db, SessionLocal
 from app.services.email_sender import send_rfp_emails, _make_yopmail
-from app.models import Distributor, RFPEmail
+from app.models import Distributor
 
 load_dotenv()
 init_db()
 
 session = SessionLocal()
 try:
-    # Clear previous Step 4 results
-    deleted = session.query(RFPEmail).delete()
+    # Reset rfp_status for all distributors
+    for d in session.query(Distributor).all():
+        d.rfp_status = "pending"
+        d.rfp_sent_at = None
     session.commit()
-    if deleted:
-        print(f"Cleared {deleted} previous RFP email records.\n")
+    print("Reset all distributor RFP statuses.\n")
 
-    emails = send_rfp_emails(session, restaurant_id=1, mock_recipient="demo")
+    processed = send_rfp_emails(session, restaurant_id=1, mock_recipient="demo")
 
     print("\n" + "=" * 60)
     print("RESULTS")
     print("=" * 60)
-    for e in emails:
-        dist = session.query(Distributor).get(e.distributor_id)
-        if e.status == "sent":
+    for dist in processed:
+        if dist.rfp_status == "sent":
             recipient = _make_yopmail(dist.name)
-            print(f"  [{e.status}] {dist.name} → {recipient}")
-            print(f"    Subject: {e.subject}")
-            body_preview = e.body.replace('\n', '\n      ')
-            print(f"    Body: \n      {body_preview}")
-        elif e.status in ("form_ready", "form_submitted", "form_failed"):
+            print(f"  [{dist.rfp_status}] {dist.name} -> {recipient}")
+        elif dist.rfp_status == "form_ready":
             form_url = dist.email[5:] if dist.email and dist.email.startswith("form:") else "?"
-            print(f"  [{e.status}] {dist.name} → {form_url}")
-            print(f"    Subject: {e.subject}")
-            body_preview = e.body.replace('\n', '\n      ')
-            print(f"    Message Payload: \n      {body_preview}")
+            print(f"  [{dist.rfp_status}] {dist.name} -> {form_url}")
         else:
-            print(f"  [{e.status}] {dist.name}")
+            print(f"  [{dist.rfp_status}] {dist.name}")
 finally:
     session.close()

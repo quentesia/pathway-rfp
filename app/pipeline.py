@@ -81,12 +81,13 @@ def run_pipeline(
         emails = send_rfp_emails(session, restaurant.id, mock_recipient="demo")
         results["emails"] = emails
 
-        # # Step 5: Monitor Inbox (nice-to-have)
-        # print("\n" + "=" * 60)
-        # print("STEP 5: Monitoring Inbox for Quotes")
-        # print("=" * 60)
-        # quotes = collect_quotes(session, restaurant.id)
-        # results["quotes"] = quotes
+        # Step 5: Monitor Inbox (nice-to-have)
+        if not skip_step5:
+            print("\n" + "=" * 60)
+            print("STEP 5: Monitoring Inbox for Quotes")
+            print("=" * 60)
+            quotes = collect_quotes(session, restaurant.id, mock_recipient="demo")
+            results["quotes"] = quotes
 
         print("\n" + "=" * 60)
         print("PIPELINE COMPLETE")
@@ -112,4 +113,5 @@ if __name__ == "__main__":
         restaurant_location=RESTAURANT_LOCATION,
         menu_url=MENU_URL,
         skip_step2=True,
+        skip_step5=False,
     )

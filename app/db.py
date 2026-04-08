@@ -19,7 +19,6 @@ def init_db():
         Restaurant, Recipe, Ingredient, RecipeIngredient,
         USDAPrice,
         Distributor, DistributorIngredient,
-        RFPEmail, RFPQuote,
     )
     Base.metadata.create_all(ENGINE)
 
