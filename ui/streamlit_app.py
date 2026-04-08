@@ -10,7 +10,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from app.db import init_db, SessionLocal
 from app.models import (
-    Recipe, Ingredient, RecipeIngredient,
+    Restaurant, Recipe, Ingredient, RecipeIngredient,
     USDAPrice, Distributor, DistributorIngredient,
 )
 from app.services.menu_parser import parse_menu
@@ -25,6 +25,52 @@ init_db()
 st.set_page_config(page_title="Pathway RFP Pipeline", layout="wide")
 st.title("Pathway RFP Pipeline")
 st.markdown("End-to-end: Menu parsing, USDA pricing, distributor search, and RFP emails.")
+
+# ── Red skip button styling ─────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Make skip buttons red instead of default blue primary */
+button[kind="primary"] {
+    background-color: #d32f2f !important;
+    border-color: #d32f2f !important;
+}
+button[kind="primary"]:hover {
+    background-color: #b71c1c !important;
+    border-color: #b71c1c !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+def _check_existing_data(restaurant_id: int) -> dict:
+    """Check which pipeline steps already have data in DB for this restaurant."""
+    session = SessionLocal()
+    try:
+        # Step 2: any USDAPrice records for restaurant's ingredients
+        ingredient_ids = [ri.ingredient_id for ri in
+            session.query(RecipeIngredient).join(Recipe).filter(
+                Recipe.restaurant_id == restaurant_id
+            ).all()]
+        has_step2 = bool(ingredient_ids and session.query(USDAPrice).filter(
+            USDAPrice.ingredient_id.in_(ingredient_ids)
+        ).first())
+
+        # Step 3: any distributors exist
+        has_step3 = session.query(Distributor).first() is not None
+
+        # Step 4: any distributor with rfp_status != pending
+        has_step4 = session.query(Distributor).filter(
+            Distributor.rfp_status != "pending"
+        ).first() is not None
+
+        # Step 5: any quoted prices
+        has_step5 = session.query(DistributorIngredient).filter(
+            DistributorIngredient.quoted_price.isnot(None)
+        ).first() is not None
+
+        return {"step2": has_step2, "step3": has_step3, "step4": has_step4, "step5": has_step5}
+    finally:
+        session.close()
 
 # ── Sidebar: Configuration ───────────────────────────────────────────────────
 
@@ -47,13 +93,14 @@ if "pipeline_state" not in st.session_state:
     }
 
 ps = st.session_state.pipeline_state
+existing = st.session_state.get("existing_data", {})
 
 # ── Step 1: Menu -> Recipes ──────────────────────────────────────────────────
 
 st.header("Step 1: Menu -> Recipes & Ingredients")
-st.markdown("Upload a menu photo or paste menu text. The system will parse each dish into a structured recipe.")
+st.markdown("Upload a menu photo or paste menu text, or select an existing restaurant from the database.")
 
-input_tab1, input_tab2 = st.tabs(["Upload Photo", "Paste Text"])
+input_tab1, input_tab2, input_tab3 = st.tabs(["Upload Photo", "Paste Text", "Use Existing"])
 
 menu_image_path = None
 with input_tab1:
@@ -73,6 +120,25 @@ with input_tab2:
         height=200,
         placeholder="STARTERS\nCrispy Calamari - Lightly breaded, served with marinara - $12\n...",
     )
+
+with input_tab3:
+    session = SessionLocal()
+    try:
+        existing_restaurants = session.query(Restaurant).all()
+    finally:
+        session.close()
+
+    if existing_restaurants:
+        options = {r.name: r.id for r in existing_restaurants}
+        selected = st.selectbox("Select a restaurant", list(options.keys()))
+        if st.button("Load Restaurant"):
+            ps["restaurant_id"] = options[selected]
+            ps["step1_done"] = True
+            existing = _check_existing_data(options[selected])
+            st.session_state.existing_data = existing
+            st.rerun()
+    else:
+        st.info("No restaurants in database yet. Parse a menu first.")
 
 has_input = bool(menu_text) or menu_image_path is not None
 
@@ -121,7 +187,19 @@ if ps["step1_done"]:
 st.header("Step 2: Market Price Trends")
 st.markdown("Fetches recent consumer price data from the BLS Average Price Data API to gauge ingredient costs.")
 
-if st.button("Fetch Market Trends", disabled=not ps["step1_done"]):
+_s2_has_existing = existing.get("step2") and not ps["step2_done"]
+if _s2_has_existing:
+    col_run, col_skip = st.columns([3, 1])
+    with col_run:
+        _s2_run = st.button("Fetch Market Trends", disabled=not ps["step1_done"])
+    with col_skip:
+        if st.button("⏭ Skip — use existing", key="skip2", type="primary", disabled=not ps["step1_done"]):
+            ps["step2_done"] = True
+            st.rerun()
+else:
+    _s2_run = st.button("Fetch Market Trends", disabled=not ps["step1_done"])
+
+if _s2_run:
     with st.spinner("Fetching market price trends from BLS API..."):
         session = SessionLocal()
         try:
@@ -162,7 +240,19 @@ if ps["step2_done"]:
 st.header("Step 3: Find Local Distributors")
 st.markdown("Searches for food distributors in the restaurant's area.")
 
-if st.button("Find Distributors", disabled=not ps["step1_done"]):
+_s3_has_existing = existing.get("step3") and not ps["step3_done"]
+if _s3_has_existing:
+    col_run, col_skip = st.columns([3, 1])
+    with col_run:
+        _s3_run = st.button("Find Distributors", disabled=not ps["step1_done"])
+    with col_skip:
+        if st.button("⏭ Skip — use existing", key="skip3", type="primary", disabled=not ps["step1_done"]):
+            ps["step3_done"] = True
+            st.rerun()
+else:
+    _s3_run = st.button("Find Distributors", disabled=not ps["step1_done"])
+
+if _s3_run:
     with st.spinner("Searching for distributors..."):
         session = SessionLocal()
         try:
@@ -234,7 +324,19 @@ if ps["step3_done"]:
 st.header("Step 4: Send RFP Emails")
 st.markdown("Composes and sends RFP emails to each distributor requesting price quotes.")
 
-if st.button("Send Emails", disabled=not ps["step3_done"]):
+_s4_has_existing = existing.get("step4") and not ps["step4_done"]
+if _s4_has_existing:
+    col_run, col_skip = st.columns([3, 1])
+    with col_run:
+        _s4_run = st.button("Send Emails", disabled=not ps["step3_done"])
+    with col_skip:
+        if st.button("⏭ Skip — use existing", key="skip4", type="primary", disabled=not ps["step3_done"]):
+            ps["step4_done"] = True
+            st.rerun()
+else:
+    _s4_run = st.button("Send Emails", disabled=not ps["step3_done"])
+
+if _s4_run:
     with st.spinner("Sending RFP emails..."):
         session = SessionLocal()
         try:
@@ -277,7 +379,19 @@ if ps["step4_done"]:
 st.header("Step 5: Collect & Compare Quotes (Nice-to-have)")
 st.markdown("Monitors inbox for distributor replies, parses quotes, and compiles a comparison.")
 
-if st.button("Check Inbox", disabled=not ps["step4_done"]):
+_s5_has_existing = existing.get("step5") and not ps["step5_done"]
+if _s5_has_existing:
+    col_run, col_skip = st.columns([3, 1])
+    with col_run:
+        _s5_run = st.button("Check Inbox", disabled=not ps["step4_done"])
+    with col_skip:
+        if st.button("⏭ Skip — use existing", key="skip5", type="primary", disabled=not ps["step4_done"]):
+            ps["step5_done"] = True
+            st.rerun()
+else:
+    _s5_run = st.button("Check Inbox", disabled=not ps["step4_done"])
+
+if _s5_run:
     with st.spinner("Monitoring inbox for replies..."):
         session = SessionLocal()
         try:
